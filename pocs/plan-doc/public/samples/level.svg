@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-labelledby="t">
+  <title id="t">레벨 콘셉트: 등불이 닿는 버섯굴 방</title>
+  <defs>
+    <radialGradient id="lamp" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFB862" stop-opacity="0.75"/>
+      <stop offset="0.6" stop-color="#E8803D" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#E8803D" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="shroom" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7FF0D2" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7FF0D2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="640" height="400" fill="#16213A"/>
+  <path d="M0 0H640V70C580 96 540 60 480 84C420 108 380 70 320 92C250 118 210 70 150 96C90 122 50 86 0 104Z" fill="#0F1830"/>
+  <path d="M0 400V300C60 280 90 300 140 290C200 278 230 300 300 296C370 292 400 270 470 282C540 294 590 276 640 286V400Z" fill="#1F3550"/>
+  <path d="M0 400V336C80 324 160 344 240 336C330 326 420 346 520 334C570 328 610 334 640 338V400Z" fill="#274462"/>
+  <!-- rock columns -->
+  <path d="M40 104C60 160 30 230 56 300H96C80 240 110 170 86 100Z" fill="#1C2C48"/>
+  <path d="M560 84C540 150 580 220 548 286H600C620 220 592 160 612 84Z" fill="#1C2C48"/>
+  <!-- platforms -->
+  <rect x="140" y="220" width="130" height="16" rx="8" fill="#2F5070"/>
+  <rect x="380" y="180" width="150" height="16" rx="8" fill="#2F5070"/>
+  <rect x="300" y="250" width="70" height="14" rx="7" fill="#2F5070"/>
+  <!-- glowing mushrooms -->
+  <g>
+    <circle cx="210" cy="206" r="40" fill="url(#shroom)"/>
+    <rect x="206" y="196" width="8" height="24" rx="3" fill="#CFE7E0"/>
+    <path d="M190 200C190 182 230 182 230 200Z" fill="#45C9A8"/>
+    <circle cx="460" cy="166" r="34" fill="url(#shroom)"/>
+    <rect x="457" y="158" width="6" height="22" rx="3" fill="#CFE7E0"/>
+    <path d="M444 162C444 148 476 148 476 162Z" fill="#45C9A8"/>
+    <circle cx="120" cy="290" r="30" fill="url(#shroom)"/>
+    <rect x="117" y="282" width="6" height="18" rx="3" fill="#CFE7E0"/>
+    <path d="M104 286C104 272 136 272 136 286Z" fill="#3AB397"/>
+    <circle cx="590" cy="282" r="26" fill="url(#shroom)"/>
+    <path d="M578 282C578 270 602 270 602 282Z" fill="#3AB397"/>
+  </g>
+  <!-- lantern light + hedgehog silhouette -->
+  <circle cx="330" cy="290" r="140" fill="url(#lamp)"/>
+  <g transform="translate(320 312)">
+    <path d="M-24 10L-30 -2L-22 -6L-28 -16L-18 -18L-20 -28L-8 -26L-4 -36L6 -28L14 -34L18 -24L28 -26L26 -14L34 -10L28 0L32 10Z" fill="#3B2A22"/>
+    <ellipse cx="2" cy="4" rx="26" ry="18" fill="#4A3427"/>
+    <rect x="30" y="-16" width="10" height="14" rx="3" fill="#FFC861"/>
+  </g>
+  <!-- bugs -->
+  <g fill="#9AA7C7">
+    <ellipse cx="420" cy="320" rx="12" ry="7"/>
+    <ellipse cx="438" cy="318" rx="6" ry="5"/>
+  </g>
+  <!-- exit marker -->
+  <path d="M500 170V130C500 116 530 116 530 130V170" fill="none" stroke="#FFC861" stroke-width="3" stroke-dasharray="6 6"/>
+  <g font-family="Apple SD Gothic Neo, Malgun Gothic, sans-serif" fill="#C9D6EA">
+    <text x="24" y="36" font-size="20" font-weight="700">버섯굴 2층, 방 B</text>
+    <text x="24" y="58" font-size="13">등불 반경 밖은 어둡게, 청록 버섯이 길잡이</text>
+    <text x="478" y="112" font-size="12">다음 방 출구</text>
+    <text x="400" y="350" font-size="12">벌레: 피해 가거나 쫓아내기</text>
+  </g>
+</svg>

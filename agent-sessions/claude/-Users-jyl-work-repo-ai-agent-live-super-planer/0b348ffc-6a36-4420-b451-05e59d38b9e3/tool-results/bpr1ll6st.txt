@@ -1,0 +1,612 @@
+{
+  "name": "plan-doc",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3103",
+    "build": "next build",
+    "start": "next start -p 3103",
+    "test": "node --test lib/assemble.test.mjs"
+  },
+  "dependencies": {
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "@anthropic-ai/sdk": "^1.8.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^24",
+    "@types/react": "^19",
+    "@types/react-dom": "^19"
+  }
+}
+import type { NextConfig } from 'next';
+import path from 'node:path';
+const nextConfig: NextConfig = { turbopack: { root: path.join(__dirname, '..') } };
+export default nextConfig;
+import path from 'node:path';
+import { db } from './db';
+
+// plan-doc owns only plan_inputs and plan_docs (see pocs/CONTRACT.md).
+export const UPLOAD_DIR = path.join(process.cwd(), '..', '.data', 'uploads');
+
+export type InputRow = { id: string; kind: 'decision' | 'image'; title: string; body: string | null; url: string | null; source: string | null; created_at: string };
+export type DocRow = { id: string; title: string; markdown: string; provider: string | null; created_at: string };
+
+const g = globalThis as unknown as { __planDocInit?: boolean };
+
+export function store() {
+  const d = db();
+  if (!g.__planDocInit) {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS plan_inputs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT, url TEXT, source TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS plan_docs (id TEXT PRIMARY KEY, title TEXT NOT NULL, markdown TEXT NOT NULL, provider TEXT, created_at TEXT NOT NULL);
+    `);
+    const { n } = d.prepare('SELECT COUNT(*) AS n FROM plan_inputs').get() as { n: number };
+    g.__planDocInit = true;
+    if (n === 0) seed();
+  }
+  return d;
+}
+
+export const now = () => new Date().toISOString();
+
+export function listInputs(): InputRow[] {
+  return store().prepare('SELECT * FROM plan_inputs ORDER BY created_at, id').all() as InputRow[];
+}
+
+export function listDocs(): Omit<DocRow, 'markdown'>[] {
+  return store().prepare('SELECT id, title, provider, created_at FROM plan_docs ORDER BY created_at DESC LIMIT 50').all() as Omit<DocRow, 'markdown'>[];
+}
+
+const SEED_DECISIONS: [string, string][] = [
+  [
+    '게임 가제와 한 줄 소개',
+    `결정: 가제는 '버섯굴 수프집'으로 간다.
+
+- 가제: 버섯굴 수프집
+- 한 줄 소개: 고슴도치 요리사가 밤마다 버섯굴에 내려가 재료를 모으고, 아침에는 그 재료로 수프를 파는 느긋한 로그라이트
+- 장르: 코지 로그라이트
+- 플랫폼: PC(Steam) 먼저, 반응을 보고 Switch 검토
+- 타깃: 하루 20분 정도 짧게 끊어 하는 15~25세 플레이어`,
+  ],
+  [
+    '코어 루프',
+    `결정: 하루는 '밤 탐험 → 아침 장사' 두 단계로 나눈다.
+
+1. 밤: 등불을 들고 버섯굴에 내려간다 (방 3~5개, 매번 새로 생성)
+2. 재료를 캐고, 길을 막는 벌레는 피하거나 가볍게 쫓아낸다
+3. 등불 기름이 떨어지기 전에 돌아온다. 쓰러지면 재료의 절반만 챙긴다
+4. 아침: 모은 재료로 수프를 끓여 손님에게 판다
+5. 번 돈으로 등불, 가방, 냄비를 고쳐 다음 밤을 준비한다`,
+  ],
+  [
+    '전투와 실패 규칙',
+    `결정: 전투는 '피하기'가 중심이고, 실패해도 크게 잃지 않는다.
+
+- 공격 버튼은 하나(국자 휘두르기), 대신 구르기와 숨기가 더 강하다
+- 쓰러져도 배운 레시피와 단골 손님은 그대로 남는다
+- 열린 질문: 보스를 넣을지, 넣는다면 주마다 한 번이 적당한가?
+- 리스크: 긴장감이 너무 낮으면 로그라이트 팬이 금방 지루해할 수 있다`,
+  ],
+  [
+    '아트와 분위기',
+    `결정: 둥근 실루엣과 따뜻한 등불 빛, 차가운 굴 배경의 대비로 간다.
+
+- 캐릭터는 2~3등신, 굵은 외곽선 없는 평면 채색
+- 굴은 남색과 청록, 등불이 닿는 곳만 주황빛
+- 수프 가게는 나무와 크림색으로, 굴과 정반대의 아늑함
+- 소리는 물방울, 보글보글 끓는 소리 위주로 조용하게`,
+  ],
+  [
+    '수프 가게 운영',
+    `결정: 장사는 계산 게임이 아니라 손님 취향을 맞히는 퍼즐로 만든다.
+
+- 아침마다 손님 3명이 오고, 각자 취향 힌트를 한 줄 남긴다
+- 취향을 맞히면 '단골도'가 오르고, 단골이 다음 밤에 쓸 도구를 준다
+- 레시피는 재료 3칸 조합, 새 조합을 찾으면 도감에 기록된다
+- 열린 질문: 가격 흥정을 넣으면 느긋한 분위기가 깨지지 않을까?`,
+  ],
+];
+
+const SEED_IMAGES: [string, string][] = [
+  ['캐릭터 콘셉트: 등불을 든 고슴도치 요리사', '/samples/character.svg'],
+  ['레벨 콘셉트: 등불이 닿는 버섯굴 방', '/samples/level.svg'],
+  ['UI 시안: 수프 레시피 3칸 조합 화면', '/samples/ui.svg'],
+  ['분위기: 새벽의 수프 가게', '/samples/mood.svg'],
+];
+
+/** Insert the sample game inputs. Fixed ids, so running it twice changes nothing. */
+export function seed() {
+  const d = db();
+  const ins = d.prepare('INSERT OR IGNORE INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  const t = Date.now();
+  SEED_DECISIONS.forEach(([title, body], i) => ins.run(`seed-d${i + 1}`, 'decision', title, body, null, 'seed', new Date(t + i).toISOString()));
+  SEED_IMAGES.forEach(([title, url], i) => ins.run(`seed-i${i + 1}`, 'image', title, null, url, 'seed', new Date(t + 10 + i).toISOString()));
+}
+// Pure image helpers (no I/O): upload sniffing and image-URL extraction from chat messages.
+export const MAX_UPLOAD = 5 * 1024 * 1024;
+
+/** MIME type from magic bytes; only png/jpeg/gif/webp. SVG and everything else → null. */
+export function sniffImage(b: Uint8Array): string | null {
+  const ascii = (from: number, to: number) => String.fromCharCode(...b.subarray(from, to));
+  if (b.length >= 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((v, i) => b[i] === v)) return 'image/png';
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b.length >= 6 && (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a')) return 'image/gif';
+  if (b.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+/** True for an absolute https URL with a host. */
+export function isHttpsUrl(s: string): boolean {
+  try {
+    const u = new URL(s);
+    return u.protocol === 'https:' && !!u.hostname && !u.username && !u.password;
+  } catch {
+    return false;
+  }
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+
+/** http(s) image URLs in free text: path ends in an image extension, or any picsum.photos link.
+ * http is kept (workflow-view links its own http://localhost samples); the server never fetches these, the browser loads them as <img>. */
+export function extractImageUrls(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/https?:\/\/[^\s<>()"'`[\]]+/g)) {
+    const raw = m[0].replace(/[.,;:!?。、]+$/, '');
+    let u: URL;
+    try {
+      u = new URL(raw);
+    } catch {
+      continue;
+    }
+    if (!/^https?:$/.test(u.protocol) || !u.hostname || u.username || u.password) continue;
+    if (IMAGE_EXT.test(u.pathname) || u.hostname === 'picsum.photos' || u.hostname.endsWith('.picsum.photos')) out.push(u.href);
+  }
+  return [...new Set(out)];
+}
+import { createHash } from 'node:crypto';
+import { tableExists } from './db';
+import { extractImageUrls } from './images';
+import { store, now } from './schema';
+
+const hid = (prefix: string, ...parts: string[]) => `${prefix}_${createHash('sha1').update(parts.join('\n')).digest('hex').slice(0, 16)}`;
+
+export type ImportResult = { ids: string[]; message?: string };
+
+/** Frozen workflow cards → decision inputs, image URLs in their messages → image inputs.
+ * Idempotent per card/URL and INSERT OR IGNORE, so a re-import never overwrites the user's edited copy. */
+export function importWorkflow(workflowId: string): ImportResult {
+  const d = store();
+  if (!['wf_workflows', 'wf_cards', 'wf_messages'].every(tableExists)) return { ids: [], message: '워크플로우 데이터가 아직 없어요. 워크플로우 화면을 먼저 열어 주세요.' };
+  const wf = d.prepare('SELECT id, title FROM wf_workflows WHERE id = ?').get(workflowId) as { id: string; title: string } | undefined;
+  if (!wf) return { ids: [], message: '이 워크플로우를 찾지 못했어요.' };
+  const cards = d
+    .prepare("SELECT id, title, description, decision FROM wf_cards WHERE workflow_id = ? AND status = 'frozen' ORDER BY y, x")
+    .all(workflowId) as { id: string; title: string; description: string | null; decision: string | null }[];
+  if (!cards.length) return { ids: [], message: `'${wf.title}'에 동결된 카드가 없어요. 카드를 동결한 뒤 다시 가져와 주세요.` };
+
+  const source = `wf:${workflowId}`;
+  const addDec = d.prepare("INSERT OR IGNORE INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, 'decision', ?, ?, NULL, ?, ?)");
+  const addImg = d.prepare("INSERT OR IGNORE INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, 'image', ?, NULL, ?, ?, ?)");
+  const msgs = d.prepare('SELECT content FROM wf_messages WHERE card_id = ? ORDER BY created_at');
+  const ids: string[] = [];
+  for (const c of cards) {
+    const id = hid('wfc', source, c.id);
+    // No decision summary → the card description becomes an open item (미정:), not a fake decision; nothing at all → empty body.
+    const decision = (c.decision ?? '').trim();
+    const desc = (c.description ?? '').trim();
+    addDec.run(id, c.title.slice(0, 200), decision ? `결정: ${decision}` : desc ? `미정: ${desc}` : '', source, now());
+    ids.push(id);
+    const urls = (msgs.all(c.id) as { content: string }[]).flatMap((m) => extractImageUrls(m.content));
+    [...new Set(urls)].forEach((url, i) => {
+      const imgId = hid('wfi', source, url);
+      addImg.run(imgId, `${c.title.slice(0, 160)} 참고 이미지 ${i + 1}`, url, source, now());
+      ids.push(imgId);
+    });
+  }
+  return { ids: [...new Set(ids)] };
+}
+
+type Concept = { what?: string; analogy?: string; details?: string[]; so_what?: string; decisions?: { track?: string; decision?: string }[] };
+
+/** Workflow title for a `wf:<id>` source, used as the game title when no decision names one. */
+export function workflowTitle(source: string | null): string | undefined {
+  if (!source?.startsWith('wf:') || !tableExists('wf_workflows')) return;
+  const r = store().prepare('SELECT title FROM wf_workflows WHERE id = ?').get(source.slice(3)) as { title: string } | undefined;
+  return r?.title.replace(/\s*\([^)]*\)\s*$/, '').trim() || undefined;
+}
+
+export function listStep1(): { session_id: string; title: string; one_liner: string; created_at: string }[] {
+  store();
+  if (!tableExists('step1_results')) return [];
+  return store().prepare('SELECT session_id, title, one_liner, created_at FROM step1_results ORDER BY created_at DESC LIMIT 20').all() as never;
+}
+
+/** One Step1 result → one decision input holding the ELI5 concept (kept as-is once imported, like workflow cards). */
+export function importStep1(sessionId: string): ImportResult {
+  const d = store();
+  if (!tableExists('step1_results')) return { ids: [], message: 'Step1 결과가 아직 없어요.' };
+  const r = d.prepare('SELECT session_id, title, one_liner, concept FROM step1_results WHERE session_id = ?').get(sessionId) as
+    | { session_id: string; title: string; one_liner: string; concept: string }
+    | undefined;
+  if (!r) return { ids: [], message: '이 Step1 결과를 찾지 못했어요.' };
+  let c: Concept = {};
+  try {
+    c = JSON.parse(r.concept) as Concept;
+  } catch {
+    // keep the title and one-liner even if the concept JSON is broken
+  }
+  const lines = [`결정: ${r.one_liner}`, '', `- 가제: ${r.title}`, `- 한 줄 소개: ${r.one_liner}`];
+  if (c.what) lines.push('', '#### 한 줄 요약', '', c.what);
+  if (c.analogy) lines.push('', '#### 비유로 말하면', '', c.analogy);
+  if (Array.isArray(c.details) && c.details.length) lines.push('', '#### 자세히', '', ...c.details.map((x) => `- ${String(x)}`));
+  if (c.so_what) lines.push('', '#### 그래서 뭐가 좋아?', '', c.so_what);
+  if (Array.isArray(c.decisions) && c.decisions.length)
+    lines.push('', '#### 결정한 것들', '', ...c.decisions.map((x) => `- ${x.track ?? '항목'}: ${x.decision ?? ''}`));
+  const source = `step1:${r.session_id}`;
+  const id = hid('s1', source);
+  d.prepare("INSERT OR IGNORE INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, 'decision', ?, ?, NULL, ?, ?)").run(id, `${r.title} 콘셉트`.slice(0, 200), lines.join('\n'), source, now());
+  return { ids: [id] };
+}
+// Pure Markdown assembly for the plan document (no I/O, so lib/assemble.test.ts can run it with node --test).
+export type Decision = { id: string; title: string; body: string; source: string | null };
+export type ImageInput = { id: string; title: string; url: string; source: string | null };
+
+export const SECTIONS = ['개요', '핵심 재미', '코어 루프', '주요 시스템', '아트·분위기', '결정 로그', '열린 질문/리스크', '다음 단계'] as const;
+
+const FALLBACK_TITLE = '이름 미정 게임';
+
+/** Escape a value for one GFM table cell: one line, pipes escaped. */
+export function cell(text: string): string {
+  return text.replace(/\s*\r?\n\s*/g, ' ').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').trim() || '-';
+}
+
+/** `![caption](url)` with the caption and URL made safe for Markdown. */
+export function imageMd(img: Pick<ImageInput, 'title' | 'url'>): string {
+  const alt = img.title.replace(/\s+/g, ' ').replace(/([[\]\\])/g, '\\$1').trim() || '이미지';
+  return `![${alt}](${mdUrl(img.url)})`;
+}
+
+const mdUrl = (url: string) => url.replace(/[\s()<>]/g, (c) => encodeURIComponent(c));
+
+export function sourceLabel(source: string | null): string {
+  if (!source) return '직접 입력';
+  if (source === 'seed') return '예시';
+  if (source === 'upload' || source === 'manual') return '직접 입력';
+  if (source.startsWith('wf:')) return '워크플로우';
+  if (source.startsWith('step1:')) return 'Step1';
+  return source;
+}
+
+const plain = (line: string) => line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').replace(/\*\*|__|`/g, '').trim();
+
+/** `키: 값` lines (also `- **키**: 값`) from a decision body. */
+function keyValues(body: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const raw of body.split('\n')) {
+    const m = plain(raw).match(/^([^:：]{1,20})[:：]\s*(.+)$/);
+    if (m) out.set(m[1].trim(), m[2].trim());
+  }
+  return out;
+}
+
+function find(decisions: Decision[], keys: string[]): string | undefined {
+  for (const d of decisions) {
+    const kv = keyValues(d.body);
+    for (const k of keys) if (kv.get(k)) return kv.get(k);
+  }
+}
+
+const has = (d: Decision, words: string[]) => words.some((w) => d.title.includes(w));
+
+const OPEN_LINE = /^(열린 질문|질문|리스크|미정)[:：]/;
+
+/** The decided line of a decision (`결정: X` or its first plain line); undefined when it only holds open items. */
+function decided(d: Decision): string | undefined {
+  const lines = d.body.split('\n').map(plain).filter((l) => l && !l.startsWith('#') && !OPEN_LINE.test(l));
+  const line = lines.find((l) => /^결정\s*[:：]/.test(l)) ?? lines[0];
+  return line?.replace(/^결정\s*[:：]\s*/, '') || undefined;
+}
+
+/** A fact named by any of `words`: a `키: 값` line whose key contains a word (e.g. `플랫폼과 한 판 길이: 폰`),
+ * else the decided line of a decision whose title contains one (workflow cards and Step1 tracks use such titles). */
+function fact(decisions: Decision[], words: string[]): string | undefined {
+  for (const d of decisions) for (const [k, v] of keyValues(d.body)) if (words.some((w) => k.includes(w))) return v;
+  for (const d of decisions) if (has(d, words)) {
+    const v = decided(d);
+    if (v) return v;
+  }
+}
+
+/** First line of a decision that reads as its conclusion. */
+export function summary(d: Decision): string {
+  const lines = d.body.split('\n').map(plain).filter((l) => l && !l.startsWith('#'));
+  const line = lines.find((l) => /^결정\s*[:：]/.test(l)) ?? lines[0] ?? d.title;
+  return line.replace(/^결정\s*[:：]\s*/, '') || d.title;
+}
+
+export function gameTitle(decisions: Decision[], fallback?: string): string {
+  return find(decisions, ['가제', '게임 이름', '제목']) ?? (fallback?.trim() || FALLBACK_TITLE);
+}
+
+/** Lines tagged as open questions or risks, or lines that end in a question mark. */
+function openItems(decisions: Decision[]): string[] {
+  const out: string[] = [];
+  for (const d of decisions) {
+    for (const raw of d.body.split('\n')) {
+      const l = plain(raw);
+      if (l.startsWith('#')) continue;
+      const tagged = l.match(new RegExp(`${OPEN_LINE.source}\\s*(.+)$`));
+      if (tagged) out.push(`${tagged[1] === '리스크' ? '리스크' : '질문'}: ${tagged[2]} (${d.title})`);
+      else if (/[?？]$/.test(l)) out.push(`질문: ${l} (${d.title})`);
+    }
+  }
+  return [...new Set(out)];
+}
+
+const LOOP_WORDS = ['루프', '흐름'];
+
+/** Loop steps: the loop decision's numbered list, else its decided line (or a `코어 루프: …` line) split on arrows.
+ * A single step with no arrow is still a decided loop. */
+export function loopSteps(decisions: Decision[]): string[] {
+  const d = decisions.find((x) => has(x, LOOP_WORDS));
+  const numbered = d ? d.body.split('\n').filter((l) => /^\s*\d+[.)]\s+/.test(l)).map(plain) : [];
+  if (numbered.length) return numbered;
+  const line = fact(decisions, LOOP_WORDS);
+  if (!line) return [];
+  return line.split(/\s*(?:→|->|⟶|⇒)\s*/).map((x) => x.replace(/[.。]+$/, '').trim()).filter(Boolean);
+}
+
+/** `결정: X` reads as X inside prose sections. */
+const unlabel = (text: string) => text.replace(/^(\s*(?:[-*+]\s+)?)결정\s*[:：]\s*/gm, '$1');
+
+/** Body without the `키: 값` lines already shown elsewhere. */
+function bodyRest(body: string, drop: string[]): string {
+  return body
+    .split('\n')
+    .filter((l) => !drop.some((k) => new RegExp(`^${k}\\s*[:：]`).test(plain(l))))
+    .join('\n')
+    .trim();
+}
+
+const OVERVIEW_KEYS = ['가제', '게임 이름', '제목', '한 줄 소개', '장르', '플랫폼', '타깃'];
+const OPEN_KEYS = ['열린 질문', '질문', '리스크', '미정'];
+
+/** Deterministic plan document built only from the given inputs. */
+export function assemble(decisions: Decision[], images: ImageInput[], fallbackTitle?: string): { title: string; markdown: string } {
+  const title = gameTitle(decisions, fallbackTitle);
+  // Overview facts; undecided ones also go to 열린 질문 so the gap is visible.
+  const overview = [
+    { label: '한 줄 소개', words: ['한 줄 소개', '한 줄 요약', '컨셉', '콘셉트'], ask: '한 줄 소개를' },
+    { label: '장르', words: ['장르'], ask: '장르를' },
+    { label: '플랫폼', words: ['플랫폼'], ask: '플랫폼을' },
+    { label: '타깃', words: ['타깃', '대상', '누가 할'], ask: '타깃을' },
+  ].map((o) => ({ ...o, value: fact(decisions, o.words) }));
+  const loopDec = decisions.find((x) => has(x, ['루프', '흐름']));
+  const artDecs = decisions.filter((x) => has(x, ['아트', '분위기', '비주얼']));
+  const funDecs = decisions.filter((x) => has(x, ['재미', '콘셉트', '컨셉']));
+  // A decision whose body is only overview lines (가제, 장르, ...) already lives in 개요.
+  const detail = (x: Decision) => bodyRest(x.body, [...OVERVIEW_KEYS, ...OPEN_KEYS, '결정']);
+  const systemDecs = decisions.filter((x) => x !== loopDec && !artDecs.includes(x) && detail(x));
+  const funFrom = funDecs.length ? funDecs : decisions.filter((x) => x !== loopDec && detail(x));
+
+  const md: string[] = [`# ${title} 기획서`, ''];
+
+  md.push('## 개요', '');
+  md.push(...overview.map((o) => `- ${o.label}: ${o.value ?? '아직 정하지 않았어요'}`), '');
+
+  md.push('## 핵심 재미', '');
+  const fun = (funFrom.length ? funFrom : decisions).map((d) => `- ${summary(d)}`);
+  md.push(...(fun.length ? fun : ['- 결정 문서가 없어요. 결정을 하나 이상 고른 뒤 다시 만들어 주세요.']), '');
+
+  md.push('## 코어 루프', '');
+  const steps = loopSteps(decisions);
+  if (steps.length) md.push(...steps.map((s, i) => `${i + 1}. ${s}`), '');
+  else md.push('1. 아직 정하지 않았어요. 코어 루프를 정한 결정 문서(제목에 루프나 흐름)를 추가해 주세요.', '');
+
+  md.push('## 주요 시스템', '');
+  if (!systemDecs.length) md.push('주요 시스템을 다룬 결정 문서가 아직 없어요.', '');
+  for (const d of systemDecs) {
+    const rest = unlabel(bodyRest(d.body, [...OVERVIEW_KEYS, ...OPEN_KEYS])).replace(/^#{1,6}\s/gm, '#### ');
+    md.push(`### ${d.title}`, '', rest || summary(d), '');
+  }
+
+  md.push('## 아트·분위기', '');
+  const artText = artDecs.map((d) => unlabel(bodyRest(d.body, OPEN_KEYS)).replace(/^#{1,6}\s/gm, '#### ')).filter(Boolean);
+  for (const t of artText) md.push(t, '');
+  if (!artText.length && !images.length) md.push('아트 방향을 정한 결정이나 이미지가 아직 없어요.', '');
+  for (const img of images) md.push(imageMd(img), '');
+
+  md.push('## 결정 로그', '', '| 항목 | 결정 | 출처 |', '| --- | --- | --- |');
+  for (const d of decisions) md.push(`| ${cell(d.title)} | ${cell(summary(d))} | ${cell(sourceLabel(d.source))} |`);
+  if (!decisions.length) md.push('| - | 선택한 결정 문서가 없어요 | - |');
+  md.push('');
+
+  md.push('## 열린 질문/리스크', '');
+  const open = [...overview.filter((o) => !o.value).map((o) => `질문: ${o.ask} 아직 정하지 않았어요 (개요)`), ...openItems(decisions)];
+  md.push(...(open.length ? open.map((o) => `- ${o}`) : ['- 결정 문서에서 열린 질문을 찾지 못했어요. 검토할 때 채워 주세요.']), '');
+
+  md.push('## 다음 단계', '');
+  const next = ['결정 로그를 팀과 함께 검토하고 빠진 결정을 채우기', '코어 루프 한 바퀴를 종이 프로토타입으로 돌려 보기'];
+  if (open.length) next.push('열린 질문마다 담당자와 답할 날짜 정하기');
+  if (!images.length) next.push('아트 레퍼런스 이미지를 모아 분위기 정하기');
+  md.push(...next.map((s, i) => `${i + 1}. ${s}`), '');
+
+  return { title, markdown: md.join('\n') };
+}
+
+/** Section names missing from a Markdown document (H1 `… 기획서` counts as `title`). */
+export function missingSections(markdown: string): string[] {
+  const heads = markdown.split('\n').filter((l) => /^##\s/.test(l)).map((l) => l.replace(/^##\s+/, ''));
+  const missing: string[] = SECTIONS.filter((s) => !heads.some((h) => h.includes(s)));
+  if (!/^#\s+.+기획서\s*$/m.test(markdown)) missing.unshift('title');
+  return missing;
+}
+
+/** Make sure every image is embedded: missing ones go at the end of the 아트·분위기 section. */
+export function ensureImages(markdown: string, images: ImageInput[]): string {
+  const absent = images.filter((img) => !markdown.includes(`](${mdUrl(img.url)}`));
+  if (!absent.length) return markdown;
+  const block = absent.map(imageMd).join('\n\n');
+  const lines = markdown.split('\n');
+  const art = lines.findIndex((l) => /^##\s.*아트/.test(l));
+  if (art < 0) return `${markdown.trimEnd()}\n\n## 아트·분위기\n\n${block}\n`;
+  let end = lines.findIndex((l, i) => i > art && /^##\s/.test(l));
+  if (end < 0) end = lines.length;
+  lines.splice(end, 0, block, '');
+  return lines.join('\n');
+}
+// Self-check: npm test -w plan-doc  (node --test lib/assemble.test.mjs; Node 22.6+ strips the .ts types)
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { assemble, cell, ensureImages, imageMd, loopSteps, missingSections, SECTIONS } from './assemble.ts';
+import { extractImageUrls, isHttpsUrl, sniffImage } from './images.ts';
+
+const decisions = [
+  { id: 'a', title: '가제', body: '- 가제: 버섯굴 수프집\n- 장르: 코지 로그라이트\n- 플랫폼: PC\n- 타깃: 15~25세\n- 한 줄 소개: 수프를 판다', source: 'seed' },
+  { id: 'b', title: '코어 루프', body: '1. 탐험\n2. 채집\n3. 장사', source: 'wf:w1' },
+  { id: 'c', title: '전투 | 실패', body: '결정: 피하기 | 숨기 중심\n- 열린 질문: 보스가 필요할까?', source: 'step1:s1' },
+  { id: 'd', title: '아트 방향', body: '둥근 실루엣', source: null },
+];
+const images = [
+  { id: 'i1', title: '캐릭터 [초안]', url: '/samples/character.svg', source: 'seed' },
+  { id: 'i2', title: '굴 (원격)', url: 'https://picsum.photos/seed/cave/640/400', source: 'wf:w1' },
+];
+
+test('assemble: every section, title, numbered loop', () => {
+  const { title, markdown } = assemble(decisions, images);
+  assert.equal(title, '버섯굴 수프집');
+  assert.match(markdown, /^# 버섯굴 수프집 기획서$/m);
+  assert.deepEqual(missingSections(markdown), []);
+  for (const s of SECTIONS) assert.match(markdown, new RegExp(`^## ${s}$`, 'm'));
+  assert.match(markdown, /^1\. 탐험\n2\. 채집\n3\. 장사$/m);
+  assert.match(markdown, /장르: 코지 로그라이트/);
+  assert.match(markdown, /질문: 보스가 필요할까\?/);
+});
+
+test('assemble: every image embedded as ![caption](url) in the art section', () => {
+  const { markdown } = assemble(decisions, images);
+  const art = markdown.slice(markdown.indexOf('## 아트·분위기'), markdown.indexOf('## 결정 로그'));
+  for (const img of images) assert.ok(art.includes(imageMd(img)), img.url);
+  assert.ok(art.includes('![캐릭터 \\[초안\\]](/samples/character.svg)'));
+});
+
+test('decision table escapes pipes and stays one row per decision', () => {
+  const { markdown } = assemble(decisions, images);
+  assert.ok(markdown.includes('| 전투 \\| 실패 | 피하기 \\| 숨기 중심 | Step1 |'));
+  const rows = markdown.split('\n').filter((l) => l.startsWith('| ') && !l.startsWith('| 항목') && !l.startsWith('| ---'));
+  assert.equal(rows.length, decisions.length);
+  assert.equal(cell('a\nb|c'), 'a b\\|c');
+});
+
+test('assemble with no inputs still has every section', () => {
+  assert.deepEqual(missingSections(assemble([], []).markdown), []);
+});
+
+test('ensureImages adds missing images into the art section only', () => {
+  const md = '# X 기획서\n\n## 아트·분위기\n\n글\n\n## 결정 로그\n\n표\n';
+  const out = ensureImages(md, images);
+  const art = out.slice(out.indexOf('## 아트'), out.indexOf('## 결정 로그'));
+  for (const img of images) assert.ok(art.includes(imageMd(img)));
+  assert.equal(ensureImages(out, images), out);
+  assert.ok(ensureImages('# X 기획서\n', images).includes('## 아트·분위기'));
+});
+
+test('missingSections reports what is absent', () => {
+  assert.deepEqual(missingSections('## 개요\n'), ['title', ...SECTIONS.slice(1)]);
+});
+
+test('sniffImage accepts png/jpeg/gif/webp by magic bytes, rejects svg and lies', () => {
+  const b = (...xs) => new Uint8Array(xs);
+  const s = (str) => new TextEncoder().encode(str);
+  assert.equal(sniffImage(b(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0)), 'image/png');
+  assert.equal(sniffImage(b(0xff, 0xd8, 0xff, 0xe0)), 'image/jpeg');
+  assert.equal(sniffImage(s('GIF89a....')), 'image/gif');
+  assert.equal(sniffImage(s('RIFF\0\0\0\0WEBPVP8 ')), 'image/webp');
+  assert.equal(sniffImage(s('<svg xmlns="http://www.w3.org/2000/svg"></svg>')), null);
+  assert.equal(sniffImage(s('<?xml version="1.0"?><svg/>')), null);
+  assert.equal(sniffImage(b()), null);
+});
+
+test('extractImageUrls finds image links and picsum, ignores pages', () => {
+  const text = '참고: https://example.com/a.png, ![x](https://cdn.example.com/b.webp) https://picsum.photos/seed/x/640/400. https://example.com/page 그리고 https://example.com/a.png';
+  assert.deepEqual(extractImageUrls(text), ['https://example.com/a.png', 'https://cdn.example.com/b.webp', 'https://picsum.photos/seed/x/640/400']);
+  assert.ok(isHttpsUrl('https://example.com/x.png'));
+  assert.ok(!isHttpsUrl('http://example.com/x.png'));
+  // http stays: workflow-view links its own http://localhost samples, and the browser (not the server) loads them
+  assert.deepEqual(extractImageUrls('http://localhost:3102/samples/core-loop.svg http://picsum.photos/1/2 http://example.com/page'), ['http://localhost:3102/samples/core-loop.svg', 'http://picsum.photos/1/2']);
+  assert.deepEqual(extractImageUrls('ftp://example.com/a.png javascript:alert(1).png http://u:p@example.com/a.png'), []);
+  assert.ok(!isHttpsUrl('javascript:alert(1)'));
+  assert.ok(!isHttpsUrl('https://user:pw@example.com/x.png'));
+});
+
+test('overview-only decision stays out of 핵심 재미 and 주요 시스템', () => {
+  const { markdown } = assemble(decisions, images);
+  const body = markdown.slice(markdown.indexOf('## 핵심 재미'), markdown.indexOf('## 아트·분위기'));
+  assert.ok(!body.includes('### 가제'));
+  assert.ok(!/^- 결정:/m.test(markdown));
+});
+
+test('workflow-view hand-off: arrow-joined loop, workflow title, empty and art decisions', () => {
+  const wf = [
+    { id: 'c', title: '컨셉', body: '결정: 고양이 정원사가 지하 정원을 탐험하는 포근한 로그라이크.', source: 'wf:w3' },
+    { id: 'l', title: '코어 루프', body: '결정: 등불을 켜고 탐험 → 씨앗 모으기 → 귀환 → 다시 탐험.', source: 'wf:w3' },
+    { id: 'e', title: '전투', body: '', source: 'wf:w3' },
+    { id: 'u', title: '아트 참고', body: '미정: 그림체 정하기', source: 'wf:w3' },
+    { id: 'a', title: '아트 방향', body: '결정: 둥근 실루엣과 따뜻한 등불 색', source: 'wf:w3' },
+  ];
+  assert.deepEqual(loopSteps(wf), ['등불을 켜고 탐험', '씨앗 모으기', '귀환', '다시 탐험']);
+  const { title, markdown } = assemble(wf, [], '포근한 던전 정원');
+  assert.equal(title, '포근한 던전 정원');
+  assert.match(markdown, /^## 코어 루프\n\n1\. 등불을 켜고 탐험\n2\. 씨앗 모으기\n3\. 귀환\n4\. 다시 탐험$/m);
+  assert.ok(!markdown.includes('결정 요약 없음'));
+  const art = markdown.slice(markdown.indexOf('## 아트·분위기'), markdown.indexOf('## 결정 로그'));
+  assert.ok(art.includes('둥근 실루엣과 따뜻한 등불 색') && !art.includes('결정:'));
+  assert.ok(markdown.includes('| 전투 | 전투 | 워크플로우 |'));
+  assert.match(markdown, /^- 질문: 그림체 정하기 \(아트 참고\)$/m);
+  assert.ok(!art.includes('미정:'));
+  assert.deepEqual(missingSections(markdown), []);
+});
+
+test('no loop decision: 코어 루프 says so instead of listing titles', () => {
+  const { markdown } = assemble([{ id: 'x', title: '컨셉', body: '결정: 정원 게임', source: null }], []);
+  const loop = markdown.slice(markdown.indexOf('## 코어 루프'), markdown.indexOf('## 주요 시스템'));
+  assert.ok(!/^1\. 컨셉$/m.test(loop));
+  assert.match(loop, /^1\. 아직 정하지 않았어요/m);
+});
+
+test('workflow hand-off with Step1 track titles: single-step loop, platform and target are decided', () => {
+  const wf = [
+    { id: 'c', title: '컨셉: 편의점 좀비 키우기', body: '결정: 좀비가 되어 편의점을 키우는 게임', source: 'wf:w' },
+    { id: 'l', title: '코어 루프', body: '결정: 심고 기다렸다가 수확하기', source: 'wf:w' },
+    { id: 'p', title: '플랫폼과 한 판 길이', body: '결정: 폰으로 쉬는 시간에 3~5분', source: 'wf:w' },
+    { id: 't', title: '누가 할 게임인지', body: '결정: 게임을 잘 안 하는 친구', source: 'wf:w' },
+    { id: 'q', title: '장르', body: '미정: 방치형인지 경영인지', source: 'wf:w' },
+  ];
+  assert.deepEqual(loopSteps(wf), ['심고 기다렸다가 수확하기']);
+  const { markdown } = assemble(wf, []);
+  assert.match(markdown, /^## 코어 루프\n\n1\. 심고 기다렸다가 수확하기$/m);
+  assert.match(markdown, /^- 플랫폼: 폰으로 쉬는 시간에 3~5분$/m);
+  assert.match(markdown, /^- 타깃: 게임을 잘 안 하는 친구$/m);
+  assert.match(markdown, /^- 한 줄 소개: 좀비가 되어 편의점을 키우는 게임$/m);
+  // an open-only decision is not a decision: 장르 stays undecided and shows up as an open question
+  assert.match(markdown, /^- 장르: 아직 정하지 않았어요$/m);
+  assert.match(markdown, /^- 질문: 장르를 아직 정하지 않았어요 \(개요\)$/m);
+  assert.ok(!markdown.includes('코어 루프를 정한 결정 문서'));
+});
+
+test('Step1 concept import: 결정한 것들 lines fill overview and loop', () => {
+  const s1 = [{
+    id: 's', title: '편의점 좀비 키우기 콘셉트', source: 'step1:x',
+    body: '결정: 좀비 편의점 키우기\n\n- 가제: 편의점 좀비 키우기\n- 한 줄 소개: 좀비 편의점 키우기\n\n#### 결정한 것들\n\n- 코어 루프: 심고 기다렸다가 수확하기\n- 플랫폼과 한 판 길이: 폰으로 쉬는 시간에 3~5분\n- 누가 할 게임인지: 게임을 잘 안 하는 친구',
+  }];
+  const { title, markdown } = assemble(s1, []);
+  assert.equal(title, '편의점 좀비 키우기');
+  assert.match(markdown, /^## 코어 루프\n\n1\. 심고 기다렸다가 수확하기$/m);
+  assert.match(markdown, /^- 플랫폼: 폰으로 쉬는 시간에 3~5분$/m);
+  assert.match(markdown, /^- 타깃: 게임을 잘 안 하는 친구$/m);
+});

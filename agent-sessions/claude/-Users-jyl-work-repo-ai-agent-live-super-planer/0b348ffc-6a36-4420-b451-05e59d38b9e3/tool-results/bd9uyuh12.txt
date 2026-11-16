@@ -1,0 +1,618 @@
+{
+  "name": "step1",
+  "private": true,
+  "scripts": { "dev": "next dev -p 3101", "build": "next build", "start": "next start -p 3101", "test": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON lib/interview.test.mjs" },
+  "dependencies": { "next": "16.4.6", "react": "19.3.1", "react-dom": "19.3.1", "@anthropic-ai/sdk": "^1.8.0" },
+  "devDependencies": { "typescript": "^5.9.0", "@types/node": "^24", "@types/react": "^19", "@types/react-dom": "^19" }
+}
+     1	// Ouroboros-style Socratic interview for a vibe game prompt: ambiguity tracks, breadth control, stop rule, ELI5 wording.
+     2	// Pure functions only (no db/llm imports) so lib/interview.test.mjs runs under plain `node --test`.
+     3	
+     4	export type TrackKey = 'fun' | 'role' | 'loop' | 'win' | 'platform' | 'mood' | 'audience' | 'unique';
+     5	export type Ledger = Record<TrackKey, number>;
+     6	export type Answer = { choices: string[]; text: string };
+     7	export type Turn = { track: TrackKey; question: string; options: string[]; answer: Answer | null };
+     8	export type Question = { track: TrackKey; question: string; hint: string; options: string[]; multi: boolean; allow_free: boolean };
+     9	export type Concept = { title: string; one_liner: string; what: string; analogy: string; details: string[]; so_what: string };
+    10	export type Decision = { key: TrackKey; track: string; decision: string };
+    11	
+    12	export const TRACKS: { key: TrackKey; label: string; weight: number }[] = [
+    13	  { key: 'fun', label: '핵심 재미', weight: 0.18 },
+    14	  { key: 'role', label: '플레이어 역할', weight: 0.12 },
+    15	  { key: 'loop', label: '코어 루프', weight: 0.18 },
+    16	  { key: 'win', label: '이기고 지는 조건', weight: 0.14 },
+    17	  { key: 'platform', label: '플랫폼과 한 판 길이', weight: 0.08 },
+    18	  { key: 'mood', label: '분위기와 그림체', weight: 0.09 },
+    19	  { key: 'audience', label: '누가 할 게임인지', weight: 0.09 },
+    20	  { key: 'unique', label: '다른 게임과 다른 점', weight: 0.12 },
+    21	];
+    22	export const TRACK_KEYS = TRACKS.map((t) => t.key);
+    23	export const label = (k: TrackKey) => TRACKS.find((t) => t.key === k)!.label;
+    24	
+    25	export const RECOMMEND = '잘 모르겠어요, 추천해 줘';
+    26	export const MAX_QUESTIONS = 8; // stop rule
+    27	export const HARD_CAP = 12; // "질문 하나 더" can go past MAX_QUESTIONS up to this
+    28	export const THRESHOLD = 0.2; // ouroboros AMBIGUITY_THRESHOLD
+    29	export const CLEAR = 0.3; // ledger shows 명확 at or below this
+    30	
+    31	// Words in the prompt or an answer that already say something about a track.
+    32	const SIGNALS: Record<TrackKey, RegExp> = {
+    33	  fun: /퍼즐|rpg|액션|농장|키우|리듬|슈팅|시뮬|카드|로그라이크|방치|타이쿤|추리|격투|레이싱|힐링|운영|대전/i,
+    34	  role: /되어|되는|주인공|플레이어는|사장|용사|역할|조종/,
+    35	  loop: /반복|모으|수확|싸우|피하|풀고|만들|키우|탐험/,
+    36	  win: /이기|지면|살아남|탈출|클리어|목표|점수|랭킹|생존|승리|패배/,
+    37	  platform: /모바일|폰|스마트폰|pc|컴퓨터|스팀|콘솔|스위치|웹|브라우저|짧게|한 판/i,
+    38	  mood: /귀여|어두|느긋|픽셀|도트|레트로|무서|따뜻|힐링|잔잔|감성|공포|밝은|파스텔/,
+    39	  audience: /친구|아이|혼자|같이|커플|가족|동생|초보|누구나/,
+    40	  unique: /다른|새로운|처음|독특|특이|섞|조합|유일/,
+    41	};
+    42	
+    43	const CHARACTERS = ['고양이', '강아지', '토끼', '공룡', '드래곤', '용', '로봇', '좀비', '유령', '닌자', '해적', '마법사', '기사', '외계인', '펭귄', '햄스터'];
+    44	const PLACES = ['우주', '바다', '숲', '농장', '학교', '카페', '식당', '도시', '던전', '섬', '사막', '지하철', '편의점', '부엌', '꿈'];
+    45	
+    46	export const clamp = (n: number) => Math.min(1, Math.max(0, n));
+    47	const round = (n: number) => Math.round(n * 100) / 100;
+    48	
+    49	/** 을/를, 이/가 … picked by the last syllable's final consonant. */
+    50	export function josa(word: string, withFinal: string, without: string): string {
+    51	  const c = word.replace(/[\s'"’”)\].,!?…]+$/, '').slice(-1).charCodeAt(0);
+    52	  if (c >= 0xac00 && c <= 0xd7a3) return (c - 0xac00) % 28 ? withFinal : without;
+    53	  return without;
+    54	}
+    55	
+    56	export function themes(prompt: string): { chars: string[]; places: string[] } {
+    57	  return { chars: CHARACTERS.filter((w) => prompt.includes(w)).slice(0, 1), places: PLACES.filter((w) => prompt.includes(w)).slice(0, 2) };
+    58	}
+    59	
+    60	function subject(prompt: string): string {
+    61	  const { chars, places } = themes(prompt);
+    62	  const words = [...chars, ...places].slice(0, 2);
+    63	  if (!words.length) return '이 게임';
+    64	  if (words.length === 1) return `${words[0]}${josa(words[0], '이', '가')} 나오는 이 게임`;
+    65	  return `${words[0]}${josa(words[0], '과', '와')} ${words[1]}${josa(words[1], '이', '가')} 나오는 이 게임`;
+    66	}
+    67	
+    68	export function initialLedger(prompt: string): Ledger {
+    69	  const l = {} as Ledger;
+    70	  for (const k of TRACK_KEYS) l[k] = SIGNALS[k].test(prompt) ? 0.55 : 1;
+    71	  if (themes(prompt).chars.length) l.role = Math.min(l.role, 0.7);
+    72	  return l;
+    73	}
+    74	
+    75	export function overall(l: Ledger): number {
+    76	  return round(TRACKS.reduce((s, t) => s + t.weight * clamp(l[t.key] ?? 1), 0));
+    77	}
+    78	
+    79	/** Deterministic re-score after an answer: the answered track drops by how concrete the answer was; words in it lower other tracks a little. */
+    80	export function applyAnswer(l: Ledger, track: TrackKey, a: Answer): Ledger {
+    81	  const next = { ...l };
+    82	  const picked = a.choices.filter((c) => c !== RECOMMEND);
+    83	  const text = a.text.trim();
+    84	  let score: number;
+    85	  if (picked.length && text) score = 0.05;
+    86	  else if (picked.length) score = 0.15;
+    87	  else if (text.length >= 6) score = 0.1;
+    88	  else if (a.choices.includes(RECOMMEND)) score = 0.3;
+    89	  else score = 0.45; // a very short free answer stays fuzzy
+    90	  next[track] = Math.min(l[track], score);
+    91	  const said = [...picked, text].join(' ');
+    92	  for (const k of TRACK_KEYS) if (k !== track && SIGNALS[k].test(said)) next[k] = Math.min(next[k], 0.5);
+    93	  return next;
+    94	}
+    95	
+    96	export const blockedTrack = (history: TrackKey[]): TrackKey | null =>
+    97	  history.length >= 2 && history.at(-1) === history.at(-2) ? history.at(-1)! : null;
+    98	
+    99	/** Most ambiguous track; after 2 consecutive turns on one track, zoom out to another (ouroboros breadth control).
+   100	 *  The first question is the ontological one ("what IS this game?") unless the prompt already pinned the fun down. */
+   101	export function pickTrack(l: Ledger, history: TrackKey[]): TrackKey {
+   102	  if (!history.length && l.fun > CLEAR) return 'fun';
+   103	  const blocked = blockedTrack(history);
+   104	  let best: TrackKey | null = null;
+   105	  for (const k of TRACK_KEYS) if (k !== blocked && (best === null || l[k] > l[best])) best = k;
+   106	  return best!;
+   107	}
+   108	
+   109	export function shouldStop(l: Ledger, asked: number): boolean {
+   110	  return overall(l) <= THRESHOLD || asked >= MAX_QUESTIONS;
+   111	}
+   112	
+   113	/** One readable decision per answered turn ("추천" picks the first option, which is always the recommended one). */
+   114	export function decisionOf(t: Turn): string {
+   115	  if (!t.answer) return '';
+   116	  const parts = t.answer.choices.map((c) => (c === RECOMMEND ? `${t.options[0] ?? '추천안'}(추천)` : c));
+   117	  if (t.answer.text.trim()) parts.push(t.answer.text.trim());
+   118	  return parts.join(', ');
+   119	}
+   120	
+   121	export function decisions(turns: Turn[]): Decision[] {
+   122	  const out: Decision[] = [];
+   123	  for (const k of TRACK_KEYS) {
+   124	    const d = turns.filter((t) => t.track === k && t.answer).map(decisionOf).filter(Boolean);
+   125	    if (d.length) out.push({ key: k, track: label(k), decision: d.join(', ') });
+   126	  }
+   127	  return out;
+   128	}
+   129	
+   130	const short = (s: string, n = 24) => (s.length > n ? `${s.slice(0, n).trim()}…` : s);
+   131	function said(turns: Turn[], k: TrackKey): string {
+   132	  const t = turns.find((x) => x.track === k && x.answer);
+   133	  if (!t) return '';
+   134	  return short(t.answer!.choices.find((c) => c !== RECOMMEND) ?? (t.answer!.choices.includes(RECOMMEND) ? t.options[0] ?? '' : t.answer!.text.trim()));
+   135	}
+   136	
+   137	type Kind = 'grow' | 'puzzle' | 'action' | 'story' | 'versus' | 'other';
+   138	const KINDS: [Kind, RegExp][] = [
+   139	  ['grow', /키우|농장|가꾸|꾸미|운영|카페|가게|타이쿤|방치|수집|모으|힐링|느긋/],
+   140	  ['puzzle', /퍼즐|머리|푸는|추리|탐정|두뇌|맞추/],
+   141	  ['action', /액션|싸우|전투|피하|슈팅|달리|점프|빠르|짜릿|리듬/],
+   142	  ['story', /이야기|스토리|소설|선택지|연애|대화/],
+   143	  ['versus', /대전|겨루|pvp|배틀|경쟁|대결|멀티/i],
+   144	];
+   145	export function kind(text: string): Kind {
+   146	  return KINDS.find(([, re]) => re.test(text))?.[0] ?? 'other';
+   147	}
+   148	const gameKind = (prompt: string, turns: Turn[]) => kind(said(turns, 'fun') || prompt);
+   149	
+   150	const LOOPS: Record<Kind, string[]> = {
+   151	  grow: ['심고 기다렸다가 수확하기', '번 돈으로 시설 업그레이드하기', '손님이나 주민의 부탁 들어주기', '새 재료를 찾아 탐험하기', '모은 것으로 공간 꾸미기'],
+   152	  puzzle: ['조각을 옮겨 맞추기', '단서를 모아 답 추리하기', '정해진 횟수 안에 풀기', '풀고 나서 다음 스테이지 열기'],
+   153	  action: ['달리고 점프해서 피하기', '적을 쓰러뜨리고 보상 줍기', '타이밍 맞춰 버튼 누르기', '강해진 뒤 더 어려운 곳 가기'],
+   154	  story: ['대화하고 선택지 고르기', '돌아다니며 단서 찾기', '선택에 따라 달라지는 결말 보기', '인물과 친해지기'],
+   155	  versus: ['짧은 판으로 친구와 겨루기', '이기고 랭크 올리기', '덱이나 팀 짜기', '상대 수를 읽고 받아치기'],
+   156	  other: ['탐험하고 재료 모으기', '모은 걸로 업그레이드하기', '적이나 장애물 넘기', '퍼즐 풀고 다음으로 가기'],
+   157	};
+   158	
+   159	/** Put options that match the text first (the first option doubles as the recommendation). */
+   160	function favour(options: string[], text: string, rules: [RegExp, string][]): string[] {
+   161	  const hit = rules.filter(([re]) => re.test(text)).map(([, o]) => o);
+   162	  return [...new Set([...hit, ...options])].slice(0, 5);
+   163	}
+   164	
+   165	/** Deterministic question bank. `depth` > 0 means the track was asked before, so dig one level deeper. */
+   166	export function mockQuestion(prompt: string, turns: Turn[], track: TrackKey): Question {
+   167	  const subj = subject(prompt);
+   168	  const depth = turns.filter((t) => t.track === track).length;
+   169	  const { chars, places } = themes(prompt);
+   170	  const all = [prompt, ...turns.flatMap((t) => (t.answer ? [...t.answer.choices, t.answer.text] : []))].join(' ');
+   171	  const q = (question: string, hint: string, options: string[], multi = false): Question => ({ track, question, hint, options, multi, allow_free: true });
+   172	  const prev = (k: TrackKey) => said(turns, k);
+   173	
+   174	  switch (track) {
+   175	    case 'fun':
+   176	      if (depth) return q(`‘${prev('fun') || '그 재미'}’가 제일 크게 터지는 순간은 언제인가요?`, '하이라이트 영상에 꼭 들어갈 3초를 떠올려 보세요.', ['목표를 딱 달성한 순간', '예상 못 한 일이 터진 순간', '남보다 잘했을 때', '모은 걸 한눈에 볼 때']);
+   177	      return q(
+   178	        `제일 신나는 순간 하나만 고른다면, ${subj}은 결국 뭘 하는 게임인가요?`,
+   179	        '쇼츠 썸네일처럼, 이 게임의 장면 하나만 보여 준다면 어떤 장면일지 떠올려 보세요.',
+   180	        favour(['차곡차곡 키우고 꾸미는 재미', '머리 써서 푸는 재미', '손이 빨라야 하는 짜릿한 재미', '이야기를 따라가는 재미', '친구랑 겨루는 재미'], all, [
+   181	          [KINDS[0][1], '차곡차곡 키우고 꾸미는 재미'], [KINDS[1][1], '머리 써서 푸는 재미'], [KINDS[2][1], '손이 빨라야 하는 짜릿한 재미'], [KINDS[3][1], '이야기를 따라가는 재미'], [KINDS[4][1], '친구랑 겨루는 재미'],
+   182	        ]),
+   183	        true,
+   184	      );
+   185	    case 'role':
+   186	      if (depth) return q('그 역할이 처음에 할 줄 아는 것과 나중에 할 수 있게 되는 것은 뭐가 다를까요?', '레벨 1 캐릭터와 만렙 캐릭터를 나란히 세워 본다고 생각해 보세요.', ['새 능력이 하나씩 열려요', '함께하는 동료가 늘어나요', '장비나 도구가 좋아져요', '능력은 그대로, 내 실력이 늘어요']);
+   187	      return q(
+   188	        `${subj}에서 플레이어는 직접 뛰어다니는 주인공인가요, 아니면 위에서 내려다보는 관리자인가요?`,
+   189	        '롤에서 챔피언 하나를 조종하는 것과, 심즈에서 동네 전체를 돌보는 것의 차이예요.',
+   190	        [...(chars[0] ? [`${chars[0]} 본인(직접 조종)`] : []), '직접 움직이는 주인공', '가게나 마을을 운영하는 사장님', '여러 캐릭터를 지휘하는 대장', '세상을 내려다보는 신 같은 존재'].slice(0, 5),
+   191	      );
+   192	    case 'loop': {
+   193	      if (depth) return q('그 행동을 100번째 해도 지루하지 않으려면 무엇이 달라져야 할까요?', '같은 노래도 리믹스되면 또 듣게 되는 것처럼요.', ['할 때마다 조금씩 바뀌는 상황', '점점 빨라지는 속도', '새로 열리는 아이템이나 구역', '친구 기록과 비교하기'], true);
+   194	      const fun = prev('fun');
+   195	      return q(
+   196	        `코어 루프(게임에서 계속 반복하는 행동)를 정해 볼게요. ${fun ? `‘${fun}’를 살리려면, ` : ''}플레이어가 1분 동안 가장 많이 하는 행동은 뭔가요?`,
+   197	        '인스타에서 ‘내리고, 보고, 좋아요’가 계속 반복되는 것처럼, 게임에도 그런 한 바퀴가 있어요. 2~3개 고르면 그게 한 바퀴예요.',
+   198	        LOOPS[gameKind(prompt, turns)],
+   199	        true,
+   200	      );
+   201	    }
+   202	    case 'win': {
+   203	      if (depth) return q('졌을 때 플레이어가 ‘한 판만 더’를 누르게 만드는 건 뭘까요?', '아깝게 놓친 뽑기 기계 앞에서 동전을 하나 더 넣게 되는 그 느낌이요.', ['다음 판에 쓸 보상이 남아요', '아까운 차이로 졌다는 게 보여요', '한 판이 짧아서 부담이 없어요', '친구가 이긴 기록이 약 올려요']);
+   204	      const loop = prev('loop');
+   205	      return q(
+   206	        `${loop ? `‘${loop}’를 계속하다가, ` : `${subj}에서 `}‘이겼다’ 또는 ‘졌다’는 언제 정해지나요?`,
+   207	        '브롤스타즈 한 판처럼 확실히 끝나는지, 마인크래프트처럼 끝없이 이어지는지의 차이예요.',
+   208	        favour(['목표를 달성하면 승리', '체력이 다 닳으면 패배', '제한 시간 안에 끝내야 해요', '끝이 없고 계속 성장만 해요', '상대보다 먼저 해내면 승리'], all, [[/느긋|힐링|방치|키우|농장/, '끝이 없고 계속 성장만 해요'], [/대전|겨루|경쟁|대결/, '상대보다 먼저 해내면 승리'], [/생존|살아남|좀비/, '체력이 다 닳으면 패배']]),
+   209	      );
+   210	    }
+   211	    case 'platform':
+   212	      if (depth) return q(`‘${prev('platform') || '그 환경'}’ 기준으로, 조작은 손가락 하나면 충분한가요, 아니면 버튼이 여러 개 필요한가요?`, '지하철에서 한 손으로 할 수 있는지 떠올려 보면 쉬워요.', ['탭 한 번이면 돼요', '스와이프(화면을 밀기)로 해요', '키보드나 패드 버튼 여러 개', '마우스로 클릭하고 끌어요']);
+   213	      return q(
+   214	        '이 게임은 주로 어디서, 한 번에 얼마나 하게 될까요?',
+   215	        '버스에서 3분 하는 게임인지, 주말 밤에 책상에 앉아 2시간 하는 게임인지예요.',
+   216	        favour(['폰으로 쉬는 시간에 3~5분', '폰으로 자기 전에 20분쯤', 'PC로 한 번에 1시간 넘게', '콘솔이나 TV로 친구랑 같이', '웹 브라우저에서 바로'], all, [[/pc|컴퓨터|스팀/i, 'PC로 한 번에 1시간 넘게'], [/콘솔|스위치/, '콘솔이나 TV로 친구랑 같이'], [/웹|브라우저/, '웹 브라우저에서 바로']]),
+   217	      );
+   218	    case 'mood':
+   219	      if (depth) return q('그 분위기를 소리로 바꾸면 어떤 음악이 깔려 있을까요?', '플레이리스트 제목을 하나 붙인다고 생각해 보세요.', ['잔잔한 로파이', '신나는 칩튠(옛날 게임기 소리)', '웅장한 오케스트라', '음악 없이 효과음만']);
+   220	      return q(
+   221	        `${subj}의 화면을 처음 본 친구는 어떤 분위기라고 느낄까요?`,
+   222	        '프로필 사진 필터를 고르듯, 색과 그림체를 골라 보세요.',
+   223	        favour(['말랑하고 귀여운 파스텔', '도트로 찍은 레트로 픽셀', '만화처럼 선이 굵고 밝은 그림', '어둡고 긴장되는 분위기', '현실에 가까운 사실적인 그림'], all, [[/귀여|느긋|힐링|따뜻|잔잔/, '말랑하고 귀여운 파스텔'], [/픽셀|도트|레트로/, '도트로 찍은 레트로 픽셀'], [/무서|어두|공포|좀비|유령/, '어둡고 긴장되는 분위기']]),
+   224	        true,
+   225	      );
+   226	    case 'audience':
+   227	      if (depth) return q('그 사람이 처음 5분 안에 그만두지 않으려면 무엇이 꼭 있어야 할까요?', '새 앱을 깔고 5분 만에 지우게 되는 이유를 거꾸로 생각해 보세요.', ['설명 없이도 아는 조작', '바로 받는 첫 보상', '한눈에 반할 캐릭터', '친구를 부르는 버튼'], true);
+   228	      return q(
+   229	        '머릿속에 딱 한 명을 떠올린다면, 이 게임을 제일 먼저 해 볼 사람은 누구인가요?',
+   230	        '단톡방에 링크를 올렸을 때 ‘이거 뭐야?’ 하고 바로 눌러 볼 사람이요.',
+   231	        favour(['게임을 잘 안 하는 친구', '매일 폰 게임 하는 친구', 'PC 게임 많이 하는 고수', '동생이나 어린 가족', '나 자신'], all, [[/친구|같이/, '매일 폰 게임 하는 친구'], [/아이|동생|가족/, '동생이나 어린 가족']]),
+   232	        true,
+   233	      );
+   234	    case 'unique': {
+   235	      if (depth) return q('그 특별한 점을 10초짜리 영상으로 보여 준다면 어떤 장면일까요?', '틱톡에서 손가락을 멈추게 만드는 첫 장면을 떠올려 보세요.', ['처음 보는 조작을 하는 손', '예상 못 한 반전 장면', '친구와 함께 터지는 순간', '점점 커지는 내 세상']);
+   236	      const combo = chars[0] && places[0] ? `${chars[0]}${josa(chars[0], '과', '와')} ${places[0]}의 의외의 조합` : places.length === 2 ? `${places[0]}${josa(places[0], '과', '와')} ${places[1]}의 의외의 조합` : null;
+   237	      return q(
+   238	        `비슷한 게임은 이미 많을 텐데, ${subj}에만 있는 한 가지는 뭔가요?`,
+   239	        '같은 떡볶이집이라도 그 집에만 있는 메뉴가 하나씩 있잖아요.',
+   240	        [...(combo ? [combo] : []), '아무도 안 해 본 조작 방식', '할 때마다 바뀌는 세상', '친구의 행동이 내 게임에 영향을 줘요', '짧지만 오래 기억나는 이야기'].slice(0, 5),
+   241	        true,
+   242	      );
+   243	    }
+   244	  }
+   245	}
+   246	
+   247	/** Restate gate goal line, and the mock concept for the result screen (ELI5: what, analogy, details, so what). */
+   248	export function goalLine(prompt: string, turns: Turn[]): string {
+   249	  const role = said(turns, 'role');
+   250	  const loop = said(turns, 'loop');
+   251	  if (role && loop) return `${role}${josa(role, '이', '가')} 되어 ${loop}${josa(loop, '을', '를')} 반복하는 게임이에요.`;
+   252	  if (loop) return `${loop}${josa(loop, '을', '를')} 반복하는 게임이에요.`;
+   253	  return `“${short(prompt, 60)}”를 바탕으로 한 게임이에요.`;
+   254	}
+   255	
+   256	const ANALOGY: Record<Kind, string> = {
+   257	  grow: '다마고치를 키우던 느낌에 내 방 꾸미기를 더한 거라고 보면 돼요.',
+   258	  puzzle: '매일 푸는 낱말 퍼즐처럼, 짧게 머리를 쓰고 ‘풀었다’ 하는 맛이에요.',
+   259	  action: '리듬게임에서 노트를 딱 맞췄을 때의 손맛이 계속 이어지는 거예요.',
+   260	  story: '웹툰 다음 화가 궁금해서 계속 넘기게 되는 것과 비슷해요.',
+   261	  versus: '친구랑 하던 가위바위보를 훨씬 깊고 길게 만든 거예요.',
+   262	  other: '좋아하는 앱을 하루에 몇 번씩 열어 보듯, 짧게 들어와 조금씩 나아가는 게임이에요.',
+   263	};
+   264	const TITLE_TAIL: Record<Kind, string> = { grow: '키우기', puzzle: '퍼즐', action: '대작전', story: '이야기', versus: '대결', other: '모험' };
+   265	
+   266	export function mockConcept(prompt: string, turns: Turn[]): Concept {
+   267	  const k = gameKind(prompt, turns);
+   268	  const { chars, places } = themes(prompt);
+   269	  const head = [...places.slice(0, 1), ...chars].join(' ') || '나만의';
+   270	  const fun = said(turns, 'fun');
+   271	  const loop = said(turns, 'loop');
+   272	  const audience = said(turns, 'audience');
+   273	  const platform = said(turns, 'platform');
+   274	  const unique = said(turns, 'unique');
+   275	  return {
+   276	    title: `${head} ${TITLE_TAIL[k]}`,
+   277	    one_liner: goalLine(prompt, turns),
+   278	    what: fun && loop ? `한마디로 ${fun}${josa(fun, '으로', '로')} ${loop}${josa(loop, '을', '를')} 계속하는 게임이에요.` : `한마디로 “${short(prompt, 40)}”를 직접 해 보는 게임이에요.`,
+   279	    analogy: ANALOGY[k],
+   280	    details: decisions(turns).map((d) => `${d.track}: ${d.decision}`),
+   281	    so_what: [
+   282	      audience ? `‘${audience}’도 ${platform ? `‘${platform}’ 동안` : '부담 없이'} 바로 즐길 수 있어요.` : '처음 하는 사람도 바로 알아볼 수 있어요.',
+   283	      unique ? `‘${unique}’ 덕분에 비슷한 게임 사이에서 기억에 남아요.` : '한 판이 끝나면 다음 판이 궁금해지게 만드는 게 목표예요.',
+   284	    ].join(' '),
+   285	  };
+   286	}
+   287	
+   288	// ---------- LLM prompts and output validation ----------
+   289	
+   290	const ELI5_RULES = `Audience: Korean players aged 15-20 (ELI5 "Age 15" + "Senior High/College" styles).
+   291	- Casual but not cringey, no "fellow kids" energy. Use "-요" polite casual Korean.
+   292	- Analogies from games, phones, social media, school life.
+   293	- One idea per sentence. Concrete over abstract.
+   294	- Any jargon gets a definition inline, e.g. "코어 루프(게임에서 계속 반복하는 행동)".
+   295	- No emoji, no marketing voice, no invented numbers or facts.`;
+   296	
+   297	export const QUESTION_SYSTEM = `You are a Socratic interviewer (ouroboros style) helping a teenager turn a vague game idea into clear decisions. You ONLY ask questions; never promise to build anything.
+   298	Ambiguity tracks (keys and Korean labels): ${TRACKS.map((t) => `${t.key}=${t.label}`).join(', ')}.
+   299	Rules for the question:
+   300	- Exactly ONE question: 1-2 Korean sentences, only ONE question mark, and the text MUST end with "?". No "for example" follow-up question.
+   301	- No preamble ("좋은 질문이에요", "알겠어요" etc. are banned).
+   302	- Target the most ambiguous track (the caller suggests one; never use the caller's blocked track).
+   303	- Build on previous answers; quote a short piece of them when it helps.
+   304	- Ontological questions are welcome where useful ("이 게임은 결국 무엇을 하는 게임인가요?").
+   305	- hint: one Korean line with an everyday analogy that makes the question easy to answer.
+   306	- options: 3-5 short Korean answers (noun phrases, at most about 25 characters, no arrows or symbols), the FIRST one is your recommendation. Do not include "잘 모르겠어요" (the app adds it).
+   307	- multi: true when several options can be true together.
+   308	Re-score ambiguity for EVERY track from 0 (fully decided) to 1 (unknown), considering the prompt and all answers so far.
+   309	${ELI5_RULES}
+   310	Reply with JSON only: {"track":"<key>","question":"...","hint":"...","options":["..."],"multi":false,"allow_free":true,"ambiguity":{"fun":0.0,...},"done":false}
+   311	Set "done": true (question may be empty) only when every track is clear enough to write a one-page game concept.`;
+   312	
+   313	export function questionUser(prompt: string, turns: Turn[], l: Ledger, target: TrackKey, blocked: TrackKey | null): string {
+   314	  return JSON.stringify({
+   315	    prompt,
+   316	    answered: turns.filter((t) => t.answer).map((t) => ({ track: t.track, question: t.question, answer: decisionOf(t) })),
+   317	    ambiguity_now: l,
+   318	    suggested_track: target,
+   319	    blocked_track: blocked,
+   320	  });
+   321	}
+   322	
+   323	const str = (v: unknown, max = 300) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+   324	
+   325	/** Validate model output; null means "use the mock instead". */
+   326	export function parseQuestion(raw: unknown, blocked: TrackKey | null): { q: Question | null; ledger: Partial<Ledger>; done: boolean } {
+   327	  const r = (raw ?? {}) as Record<string, unknown>;
+   328	  const ledger: Partial<Ledger> = {};
+   329	  const amb = (r.ambiguity ?? {}) as Record<string, unknown>;
+   330	  for (const k of TRACK_KEYS) if (typeof amb[k] === 'number' && Number.isFinite(amb[k])) ledger[k] = clamp(amb[k] as number);
+   331	  const done = r.done === true;
+   332	  const track = r.track as TrackKey;
+   333	  const question = str(r.question);
+   334	  const options = Array.isArray(r.options) ? [...new Set(r.options.map((o) => str(o, 80)).filter((o) => o && o !== RECOMMEND))].slice(0, 5) : [];
+   335	  const ok = TRACK_KEYS.includes(track) && track !== blocked && /[?？]$/.test(question) && options.length >= 2;
+   336	  return { q: ok ? { track, question, hint: str(r.hint, 200), options, multi: r.multi === true, allow_free: r.allow_free !== false } : null, ledger, done };
+   337	}
+   338	
+   339	export const CONCEPT_SYSTEM = `You turn a finished game-idea interview into a short ELI5 concept card in Korean.
+   340	${ELI5_RULES}
+   341	Structure (ELI5): start with the "what" in one sentence, then an analogy, then details, then the "so what".
+   342	Reply with JSON only:
+   343	{"title":"게임 이름(가제), 2-12 Korean chars, catchy but plain","one_liner":"one sentence","what":"이게 뭐냐면: one sentence","analogy":"비유하자면: 1-2 sentences","details":["3-6 short bullets"],"so_what":"그래서 왜 재밌냐면: 1-2 sentences"}
+   344	Do not start values with the section names ("이게 뭐냐면:", "비유하자면:" ...); the app shows them as headings.
+   345	Use only what the prompt and answers say; do not invent features, numbers or facts.`;
+   346	
+   347	export function conceptUser(prompt: string, turns: Turn[]): string {
+   348	  return JSON.stringify({ prompt, decisions: decisions(turns).map(({ track, decision }) => ({ track, decision })) });
+   349	}
+   350	
+   351	const LABEL = /^(이게 뭐냐면|비유하자면|조금 더 자세히|그래서 왜 재밌냐면)\s*[:：]\s*/;
+   352	export function parseConcept(raw: unknown, fallback: Concept): Concept {
+   353	  const r = (raw ?? {}) as Record<string, unknown>;
+   354	  const str = (v: unknown, max = 300) => (typeof v === 'string' ? v.trim().replace(LABEL, '').slice(0, max) : '');
+   355	  const details = Array.isArray(r.details) ? r.details.map((d) => str(d, 200)).filter(Boolean).slice(0, 8) : [];
+   356	  return {
+   357	    title: str(r.title, 40) || fallback.title,
+   358	    one_liner: str(r.one_liner) || fallback.one_liner,
+   359	    what: str(r.what) || fallback.what,
+   360	    analogy: str(r.analogy) || fallback.analogy,
+   361	    details: details.length ? details : fallback.details,
+   362	    so_what: str(r.so_what) || fallback.so_what,
+   363	  };
+   364	}
+     1	import { randomUUID } from 'node:crypto';
+     2	import { db } from './db';
+     3	import { completeJSON, provider } from './llm';
+     4	import { ensureSchema } from './schema';
+     5	import {
+     6	  HARD_CAP, MAX_QUESTIONS, RECOMMEND, TRACKS, CLEAR, QUESTION_SYSTEM, CONCEPT_SYSTEM,
+     7	  applyAnswer, blockedTrack, conceptUser, decisions, goalLine, initialLedger, label, mockConcept, mockQuestion,
+     8	  overall, parseConcept, parseQuestion, pickTrack, questionUser, shouldStop,
+     9	  type Answer, type Ledger, type Question, type TrackKey, type Turn,
+    10	} from './interview';
+    11	
+    12	type TurnRow = { id: string; idx: number; track: TrackKey; question: string; hint: string | null; options: string; allow_free: number; multi: number; answer: string | null; ledger: string | null; provider: string | null };
+    13	type SessionRow = { id: string; prompt: string; status: 'interviewing' | 'done'; ambiguity: number | null; tracks: string | null; created_at: string };
+    14	
+    15	export type TurnView = { id: string; idx: number; track: TrackKey; trackLabel: string; question: string; hint: string; options: string[]; multi: boolean; allowFree: boolean; answer: Answer | null; provider: string };
+    16	export type Concept = { what: string; analogy: string; details: string[]; so_what: string; decisions: { track: string; decision: string }[] };
+    17	export type State = {
+    18	  id: string; prompt: string; status: 'interviewing' | 'done'; createdAt: string;
+    19	  overall: number; ledger: { key: TrackKey; label: string; score: number; clear: boolean }[];
+    20	  turns: TurnView[]; open: TurnView | null;
+    21	  restate: { goal: string; decisions: { track: string; decision: string }[]; fuzzy: string[]; canAskMore: boolean } | null;
+    22	  result: { title: string; one_liner: string; concept: Concept; provider: string } | null;
+    23	  maxQuestions: number;
+    24	};
+    25	
+    26	const now = () => new Date().toISOString();
+    27	const newId = () => randomUUID().replaceAll('-', '').slice(0, 10);
+    28	
+    29	function rows(id: string) {
+    30	  ensureSchema();
+    31	  const s = db().prepare('SELECT * FROM step1_sessions WHERE id = ?').get(id) as SessionRow | undefined;
+    32	  if (!s) return null;
+    33	  const t = db().prepare('SELECT * FROM step1_turns WHERE session_id = ? ORDER BY idx').all(id) as TurnRow[];
+    34	  return { s, t, ledger: JSON.parse(s.tracks ?? '{}') as Ledger };
+    35	}
+    36	
+    37	const toTurn = (r: TurnRow): Turn => ({ track: r.track, question: r.question, options: JSON.parse(r.options), answer: r.answer ? JSON.parse(r.answer) : null });
+    38	
+    39	export function getState(id: string): State | null {
+    40	  const x = rows(id);
+    41	  if (!x) return null;
+    42	  const { s, t, ledger } = x;
+    43	  const views: TurnView[] = t.map((r) => ({
+    44	    id: r.id, idx: r.idx, track: r.track, trackLabel: label(r.track), question: r.question, hint: r.hint ?? '',
+    45	    options: JSON.parse(r.options), multi: !!r.multi, allowFree: !!r.allow_free, answer: r.answer ? JSON.parse(r.answer) : null, provider: r.provider ?? '',
+    46	  }));
+    47	  const open = views.find((v) => !v.answer) ?? null;
+    48	  const turns = t.map(toTurn);
+    49	  const res = db().prepare('SELECT * FROM step1_results WHERE session_id = ?').get(id) as { title: string; one_liner: string; concept: string; provider: string | null } | undefined;
+    50	  const ledgerView = TRACKS.map((tr) => ({ key: tr.key, label: tr.label, score: ledger[tr.key] ?? 1, clear: (ledger[tr.key] ?? 1) <= CLEAR }));
+    51	  return {
+    52	    id: s.id, prompt: s.prompt, status: s.status, createdAt: s.created_at,
+    53	    overall: overall(ledger), ledger: ledgerView, turns: views, open,
+    54	    restate: s.status === 'interviewing' && !open
+    55	      ? { goal: goalLine(s.prompt, turns), decisions: decisions(turns).map(({ track, decision }) => ({ track, decision })), fuzzy: ledgerView.filter((l) => !l.clear).map((l) => l.label), canAskMore: t.length < HARD_CAP }
+    56	      : null,
+    57	    result: res ? { title: res.title, one_liner: res.one_liner, concept: JSON.parse(res.concept), provider: res.provider ?? '' } : null,
+    58	    maxQuestions: MAX_QUESTIONS,
+    59	  };
+    60	}
+    61	
+    62	export function listSessions(limit = 20) {
+    63	  ensureSchema();
+    64	  return db().prepare(`
+    65	    SELECT s.id, s.prompt, s.status, s.created_at, r.title, (SELECT COUNT(*) FROM step1_turns t WHERE t.session_id = s.id AND t.answer IS NOT NULL) AS answered
+    66	    FROM step1_sessions s LEFT JOIN step1_results r ON r.session_id = s.id ORDER BY s.created_at DESC LIMIT ?`).all(limit) as
+    67	    { id: string; prompt: string; status: string; created_at: string; title: string | null; answered: number }[];
+    68	}
+    69	
+    70	/** Ask the next question (LLM, or the mock bank when the model is off/fails/breaks a rule). No-op if one is already open. */
+    71	async function askNext(id: string, force = false): Promise<void> {
+    72	  const x = rows(id)!;
+    73	  if (x.t.some((r) => !r.answer) || x.s.status !== 'interviewing') return;
+    74	  const turns = x.t.map(toTurn);
+    75	  if (turns.length >= HARD_CAP || (!force && shouldStop(x.ledger, turns.length))) return;
+    76	  const history = turns.map((t) => t.track);
+    77	  const blocked = blockedTrack(history);
+    78	  const target = pickTrack(x.ledger, history);
+    79	  const mock = () => ({ ...mockQuestion(x.s.prompt, turns, target), ambiguity: x.ledger, done: false });
+    80	  const res = await completeJSON(QUESTION_SYSTEM, questionUser(x.s.prompt, turns, x.ledger, target, blocked), mock);
+    81	  const parsed = parseQuestion(res.data, blocked);
+    82	  const ledger = { ...x.ledger, ...parsed.ledger };
+    83	  let q: Question;
+    84	  let used: string = res.provider;
+    85	  if (parsed.q) q = parsed.q;
+    86	  else if (parsed.done && !force && res.provider !== 'mock') {
+    87	    db().prepare('UPDATE step1_sessions SET tracks = ?, ambiguity = ? WHERE id = ?').run(JSON.stringify(ledger), overall(ledger), id);
+    88	    return; // model says every track is clear: go to the Restate gate
+    89	  } else {
+    90	    const pick = pickTrack(ledger, history);
+    91	    q = mockQuestion(x.s.prompt, turns, pick);
+    92	    used = res.provider === 'mock' ? 'mock' : 'mock (LLM 응답을 쓸 수 없어 기본 질문)';
+    93	  }
+    94	  if (res.error) used = 'mock (LLM 호출 실패)';
+    95	  const d = db();
+    96	  if (d.prepare('SELECT 1 FROM step1_turns WHERE session_id = ? AND answer IS NULL').get(id)) return; // a parallel request won
+    97	  d.prepare('INSERT INTO step1_turns (id, session_id, idx, track, question, hint, options, allow_free, multi, answer, ledger, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)')
+    98	    .run(newId(), id, turns.length, q.track, q.question, q.hint, JSON.stringify(q.options), q.allow_free ? 1 : 0, q.multi ? 1 : 0, JSON.stringify(ledger), used, now());
+    99	  d.prepare('UPDATE step1_sessions SET tracks = ?, ambiguity = ? WHERE id = ?').run(JSON.stringify(ledger), overall(ledger), id);
+   100	}
+   101	
+   102	export async function createSession(prompt: string): Promise<string> {
+   103	  ensureSchema();
+   104	  const id = newId();
+   105	  const ledger = initialLedger(prompt);
+   106	  db().prepare('INSERT INTO step1_sessions (id, prompt, status, ambiguity, tracks, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, prompt, 'interviewing', overall(ledger), JSON.stringify(ledger), now());
+   107	  await askNext(id);
+   108	  return id;
+   109	}
+   110	
+   111	export class InputError extends Error {}
+   112	
+   113	export async function act(id: string, body: Record<string, unknown>): Promise<State | null> {
+   114	  const x = rows(id);
+   115	  if (!x) return null;
+   116	  const open = x.t.find((r) => !r.answer);
+   117	  const d = db();
+   118	  switch (body.action) {
+   119	    case 'answer': {
+   120	      if (x.s.status !== 'interviewing' || !open || body.turnId !== open.id) throw new InputError('이미 답한 질문이에요. 화면을 새로 고쳐 주세요.');
+   121	      const options: string[] = JSON.parse(open.options);
+   122	      const raw = Array.isArray(body.choices) ? body.choices : [];
+   123	      const choices = [...new Set(raw.filter((c): c is string => typeof c === 'string'))];
+   124	      if (choices.some((c) => c !== RECOMMEND && !options.includes(c))) throw new InputError('보기에 없는 답이 섞여 있어요.');
+   125	      if (!open.multi && choices.length > 1) throw new InputError('이 질문은 하나만 고를 수 있어요.');
+   126	      const text = typeof body.text === 'string' ? body.text.trim() : '';
+   127	      if (text.length > 500) throw new InputError('직접 쓰기는 500자까지예요.');
+   128	      if (!open.allow_free && text) throw new InputError('이 질문은 직접 쓰기를 받지 않아요.');
+   129	      if (!choices.length && !text) throw new InputError('보기를 고르거나 직접 써 주세요.');
+   130	      const answer: Answer = { choices, text };
+   131	      const ledger = applyAnswer(x.ledger, open.track, answer);
+   132	      d.prepare('UPDATE step1_turns SET answer = ? WHERE id = ?').run(JSON.stringify(answer), open.id);
+   133	      d.prepare('UPDATE step1_sessions SET tracks = ?, ambiguity = ? WHERE id = ?').run(JSON.stringify(ledger), overall(ledger), id);
+   134	      await askNext(id);
+   135	      break;
+   136	    }
+   137	    case 'wrap': // 여기까지로 정리하기: drop the open question, go to the Restate gate
+   138	      if (x.s.status !== 'interviewing') break;
+   139	      if (!x.t.some((r) => r.answer)) throw new InputError('질문에 하나 이상 답해야 정리할 수 있어요.');
+   140	      if (open) d.prepare('DELETE FROM step1_turns WHERE id = ?').run(open.id);
+   141	      break;
+   142	    case 'more': // Restate gate: "질문 하나 더"
+   143	      if (x.s.status === 'interviewing' && !open) await askNext(id, true);
+   144	      break;
+   145	    case 'back': { // 이전: drop the open question, reopen the last answered one and restore its ledger
+   146	      if (x.s.status !== 'interviewing') break;
+   147	      const last = [...x.t].reverse().find((r) => r.answer);
+   148	      if (!last) break;
+   149	      if (open) d.prepare('DELETE FROM step1_turns WHERE id = ?').run(open.id);
+   150	      d.prepare('UPDATE step1_turns SET answer = NULL WHERE id = ?').run(last.id);
+   151	      const ledger = last.ledger ?? x.s.tracks ?? '{}';
+   152	      d.prepare('UPDATE step1_sessions SET tracks = ?, ambiguity = ? WHERE id = ?').run(ledger, overall(JSON.parse(ledger)), id);
+   153	      break;
+   154	    }
+   155	    case 'finish': { // Restate gate confirmed: write the ELI5 concept
+   156	      if (x.s.status !== 'interviewing' || open) throw new InputError('정리할 준비가 아직 안 됐어요.');
+   157	      const turns = x.t.map(toTurn);
+   158	      if (!turns.length) throw new InputError('질문에 하나 이상 답해야 정리할 수 있어요.');
+   159	      const fallback = mockConcept(x.s.prompt, turns);
+   160	      const res = await completeJSON(CONCEPT_SYSTEM, conceptUser(x.s.prompt, turns), () => fallback);
+   161	      const c = parseConcept(res.data, fallback);
+   162	      const concept = { what: c.what, analogy: c.analogy, details: c.details, so_what: c.so_what, decisions: decisions(turns).map(({ track, decision }) => ({ track, decision })) };
+   163	      if (rows(id)!.s.status === 'done') break; // a parallel request already finished it
+   164	      d.prepare('INSERT OR REPLACE INTO step1_results (session_id, title, one_liner, concept, provider, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+   165	        .run(id, c.title, c.one_liner, JSON.stringify(concept), res.error ? 'mock (LLM 호출 실패)' : res.provider, now());
+   166	      d.prepare("UPDATE step1_sessions SET status = 'done' WHERE id = ?").run(id);
+   167	      break;
+   168	    }
+   169	    default:
+   170	      throw new InputError('알 수 없는 요청이에요.');
+   171	  }
+   172	  return getState(id);
+   173	}
+   174	
+   175	export { provider };
+     1	import { db } from './db';
+     2	import { applyAnswer, initialLedger, mockConcept, mockQuestion, overall, pickTrack, decisions, shouldStop, type Answer, type TrackKey, type Turn } from './interview';
+     3	
+     4	// step1 owns step1_* only (pocs/CONTRACT.md). Added columns beyond the contract: sessions.tracks, turns.multi/ledger/provider, results.provider.
+     5	const g = globalThis as unknown as { __step1Schema?: boolean };
+     6	
+     7	export function ensureSchema() {
+     8	  if (g.__step1Schema) return;
+     9	  db().exec(`
+    10	    CREATE TABLE IF NOT EXISTS step1_sessions (
+    11	      id TEXT PRIMARY KEY, prompt TEXT NOT NULL, status TEXT NOT NULL, ambiguity REAL,
+    12	      tracks TEXT,                       -- JSON {track: 0..1}, the live ambiguity ledger
+    13	      created_at TEXT NOT NULL);
+    14	    CREATE TABLE IF NOT EXISTS step1_turns (
+    15	      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, idx INTEGER NOT NULL, track TEXT,
+    16	      question TEXT NOT NULL, hint TEXT, options TEXT NOT NULL,
+    17	      allow_free INTEGER NOT NULL DEFAULT 1, multi INTEGER NOT NULL DEFAULT 0,
+    18	      answer TEXT,
+    19	      ledger TEXT,                       -- ledger when this question was asked (restored by 이전)
+    20	      provider TEXT,
+    21	      created_at TEXT NOT NULL);
+    22	    CREATE INDEX IF NOT EXISTS step1_turns_session ON step1_turns(session_id, idx);
+    23	    CREATE TABLE IF NOT EXISTS step1_results (
+    24	      session_id TEXT PRIMARY KEY, title TEXT NOT NULL, one_liner TEXT NOT NULL, concept TEXT NOT NULL,
+    25	      provider TEXT, created_at TEXT NOT NULL);
+    26	  `);
+    27	  seed();
+    28	  g.__step1Schema = true;
+    29	}
+    30	
+    31	// A finished sample interview (id 'sample') so the app and the workflow-view hand-off can be reviewed with an empty DB.
+    32	const SAMPLE_PROMPT = '고양이가 우주 농장을 운영하는 느긋한 게임';
+    33	const SAMPLE: Record<TrackKey, Answer> = {
+    34	  fun: { choices: ['차곡차곡 키우고 꾸미는 재미'], text: '행성마다 다른 작물이 자라는 걸 보는 맛' },
+    35	  loop: { choices: ['심고 기다렸다가 수확하기', '모은 것으로 공간 꾸미기'], text: '' },
+    36	  role: { choices: ['고양이 본인(직접 조종)'], text: '' },
+    37	  win: { choices: ['끝이 없고 계속 성장만 해요'], text: '대신 주간 목표가 있어요' },
+    38	  mood: { choices: ['말랑하고 귀여운 파스텔'], text: '' },
+    39	  unique: { choices: [], text: '친구 우주 농장에 놀러 가서 작물을 몰래 가져오기' },
+    40	  platform: { choices: ['폰으로 자기 전에 20분쯤'], text: '' },
+    41	  audience: { choices: ['게임을 잘 안 하는 친구'], text: '' },
+    42	};
+    43	
+    44	function seed() {
+    45	  const d = db();
+    46	  if (d.prepare('SELECT 1 FROM step1_sessions LIMIT 1').get()) return;
+    47	  const now = new Date().toISOString();
+    48	  let ledger = initialLedger(SAMPLE_PROMPT);
+    49	  const turns: Turn[] = [];
+    50	  const ins = d.prepare('INSERT INTO step1_turns (id, session_id, idx, track, question, hint, options, allow_free, multi, answer, ledger, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)');
+    51	  d.exec('BEGIN');
+    52	  try {
+    53	    for (let i = 0; !shouldStop(ledger, i); i++) {
+    54	      const q = mockQuestion(SAMPLE_PROMPT, turns, pickTrack(ledger, turns.map((t) => t.track)));
+    55	      const a = SAMPLE[q.track];
+    56	      ins.run(`sample-${i}`, 'sample', i, q.track, q.question, q.hint, JSON.stringify(q.options), q.multi ? 1 : 0, JSON.stringify(a), JSON.stringify(ledger), 'seed', now);
+    57	      turns.push({ track: q.track, question: q.question, options: q.options, answer: a });
+    58	      ledger = applyAnswer(ledger, q.track, a);
+    59	    }
+    60	    const c = mockConcept(SAMPLE_PROMPT, turns);
+    61	    d.prepare('INSERT INTO step1_sessions (id, prompt, status, ambiguity, tracks, created_at) VALUES (?, ?, ?, ?, ?, ?)').run('sample', SAMPLE_PROMPT, 'done', overall(ledger), JSON.stringify(ledger), now);
+    62	    d.prepare('INSERT INTO step1_results (session_id, title, one_liner, concept, provider, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    63	      'sample', c.title, c.one_liner,
+    64	      JSON.stringify({ what: c.what, analogy: c.analogy, details: c.details, so_what: c.so_what, decisions: decisions(turns).map(({ track, decision }) => ({ track, decision })) }),
+    65	      'seed', now,
+    66	    );
+    67	    d.exec('COMMIT');
+    68	  } catch (e) {
+    69	    d.exec('ROLLBACK');
+    70	    throw e;
+    71	  }
+    72	}

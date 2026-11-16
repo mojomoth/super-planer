@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-labelledby="t">
+  <title id="t">UI 시안: 수프 레시피 3칸 조합 화면</title>
+  <rect width="640" height="400" fill="#E9DCC6"/>
+  <rect x="24" y="24" width="592" height="352" rx="18" fill="#B98A5E"/>
+  <rect x="36" y="36" width="568" height="328" rx="12" fill="#FBF4E8"/>
+  <g font-family="Apple SD Gothic Neo, Malgun Gothic, sans-serif">
+    <text x="60" y="78" font-size="22" font-weight="700" fill="#5A3E2A">오늘의 수프 만들기</text>
+    <text x="60" y="102" font-size="13" fill="#8A6E57">재료 3개를 냄비 칸에 넣어 보세요</text>
+  </g>
+  <!-- three slots -->
+  <g>
+    <rect x="60" y="132" width="96" height="96" rx="14" fill="#F1E3CC" stroke="#C9A77F" stroke-width="3"/>
+    <rect x="176" y="132" width="96" height="96" rx="14" fill="#F1E3CC" stroke="#C9A77F" stroke-width="3"/>
+    <rect x="292" y="132" width="96" height="96" rx="14" fill="#F1E3CC" stroke="#C9A77F" stroke-width="3" stroke-dasharray="8 6"/>
+    <!-- mushroom -->
+    <rect x="102" y="174" width="12" height="32" rx="5" fill="#F3E6D3" stroke="#C9A77F" stroke-width="2"/>
+    <path d="M80 180C80 150 136 150 136 180Z" fill="#D9604A"/>
+    <circle cx="96" cy="166" r="5" fill="#FBF4E8"/><circle cx="118" cy="170" r="4" fill="#FBF4E8"/>
+    <!-- root -->
+    <path d="M224 150C244 160 246 196 224 214C204 196 206 160 224 150Z" fill="#E8A24A"/>
+    <path d="M218 148L210 136M226 148L230 134" stroke="#6FA35A" stroke-width="5" stroke-linecap="round"/>
+    <!-- empty slot plus -->
+    <path d="M340 166V194M326 180H354" stroke="#C9A77F" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <path d="M404 180H440M430 168L442 180L430 192" fill="none" stroke="#8A6E57" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- pot -->
+  <g>
+    <path d="M466 160H574L566 222C564 234 556 240 544 240H496C484 240 476 234 474 222Z" fill="#4E5F78"/>
+    <rect x="458" y="150" width="124" height="14" rx="7" fill="#3E4D63"/>
+    <path d="M500 140C494 128 506 120 500 108M520 140C514 128 526 120 520 108M540 140C534 128 546 120 540 108" fill="none" stroke="#B9A58A" stroke-width="3" stroke-linecap="round"/>
+    <text x="520" y="206" font-family="Apple SD Gothic Neo, Malgun Gothic, sans-serif" font-size="28" font-weight="700" fill="#FBF4E8" text-anchor="middle">?</text>
+  </g>
+  <!-- customer hint -->
+  <g>
+    <circle cx="86" cy="296" r="26" fill="#C7D9C0"/>
+    <circle cx="78" cy="292" r="3" fill="#3A2A20"/><circle cx="94" cy="292" r="3" fill="#3A2A20"/>
+    <path d="M80 304C84 308 90 308 94 304" fill="none" stroke="#3A2A20" stroke-width="2" stroke-linecap="round"/>
+    <path d="M124 270H392C400 270 406 276 406 284V312C406 320 400 326 392 326H136L124 336V284C124 276 118 270 124 270Z" fill="#FFFFFF" stroke="#D8C6AA" stroke-width="2"/>
+    <text x="142" y="294" font-family="Apple SD Gothic Neo, Malgun Gothic, sans-serif" font-size="14" fill="#5A3E2A">두더지 손님: "흙냄새 나는 따끈한 거요"</text>
+    <text x="142" y="314" font-family="Apple SD Gothic Neo, Malgun Gothic, sans-serif" font-size="12" fill="#8A6E57">단골도 2 / 5</text>
+  </g>
+  <!-- buttons -->
+  <rect x="440" y="284" width="140" height="44" rx="10" fill="#D9604A"/>
+  <rect x="440" y="324" width="140" height="6" rx="3" fill="#A9452F"/>
+  <text x="510" y="312" font-family="Apple SD Gothic Neo, Malgun Gothic, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF" text-anchor="middle">끓이기</text>
+</svg>

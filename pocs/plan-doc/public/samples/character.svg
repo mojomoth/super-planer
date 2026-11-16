@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-labelledby="t">
+  <title id="t">캐릭터 콘셉트: 등불을 든 고슴도치 요리사</title>
+  <defs>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFD27A" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#FFD27A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="640" height="400" fill="#F6EFE3"/>
+  <g stroke="#E6DCCB" stroke-width="1">
+    <path d="M0 80H640M0 160H640M0 240H640M0 320H640"/>
+  </g>
+  <rect x="0" y="340" width="640" height="60" fill="#EADFCB"/>
+  <ellipse cx="250" cy="344" rx="110" ry="12" fill="#D9CBB2"/>
+
+  <!-- main pose -->
+  <g transform="translate(250 230)">
+    <path d="M-92 40 L-104 8 L-84 0 L-100 -30 L-74 -34 L-82 -66 L-52 -62 L-50 -96 L-22 -84 L-10 -114 L12 -90 L34 -110 L44 -80 L72 -90 L70 -58 L98 -56 L86 -26 L108 -14 L88 10 L100 40 Z" fill="#7A5236"/>
+    <ellipse cx="0" cy="20" rx="88" ry="78" fill="#8E6243"/>
+    <path d="M-20 -10 C 20 -40 80 -20 92 18 C 100 52 70 86 30 92 C -10 96 -40 70 -40 40 C -40 18 -34 0 -20 -10 Z" fill="#F0D6B4"/>
+    <circle cx="96" cy="22" r="10" fill="#3A2A20"/>
+    <circle cx="44" cy="12" r="7" fill="#2A1E17"/>
+    <circle cx="46" cy="10" r="2" fill="#FFFFFF"/>
+    <ellipse cx="40" cy="38" rx="12" ry="6" fill="#F2A98F"/>
+    <path d="M-40 60 C -30 100 50 104 66 72 L 62 110 L -36 110 Z" fill="#FFFFFF"/>
+    <path d="M-40 60 C -30 100 50 104 66 72" fill="none" stroke="#C9B9A2" stroke-width="2"/>
+    <rect x="2" y="82" width="22" height="16" rx="4" fill="#E86A4A"/>
+    <!-- chef hat -->
+    <path d="M-30 -96 C -60 -110 -50 -150 -18 -146 C -10 -172 30 -172 38 -146 C 70 -152 78 -112 48 -98 Z" fill="#FFFFFF"/>
+    <rect x="-28" y="-104" width="74" height="20" rx="6" fill="#F4F0EA"/>
+    <!-- feet -->
+    <ellipse cx="-30" cy="112" rx="20" ry="9" fill="#5E3E29"/>
+    <ellipse cx="40" cy="112" rx="20" ry="9" fill="#5E3E29"/>
+    <!-- arm + lantern -->
+    <path d="M70 52 C 100 50 120 30 128 6" fill="none" stroke="#8E6243" stroke-width="16" stroke-linecap="round"/>
+    <circle cx="140" cy="0" r="70" fill="url(#glow)"/>
+    <path d="M128 -38 C 128 -56 152 -56 152 -38" fill="none" stroke="#5B4A3A" stroke-width="4"/>
+    <rect x="122" y="-38" width="36" height="8" rx="3" fill="#5B4A3A"/>
+    <rect x="124" y="-30" width="32" height="40" rx="8" fill="#FFC861" stroke="#5B4A3A" stroke-width="4"/>
+    <path d="M140 -18 C 134 -10 136 0 140 2 C 146 0 146 -10 140 -18 Z" fill="#E8733D"/>
+    <rect x="122" y="10" width="36" height="8" rx="3" fill="#5B4A3A"/>
+  </g>
+
+  <!-- turnaround silhouettes -->
+  <g fill="#B9A58A">
+    <g transform="translate(470 280) scale(0.42)">
+      <ellipse cx="0" cy="20" rx="88" ry="78"/>
+      <path d="M-30 -96 C -60 -110 -50 -150 -18 -146 C -10 -172 30 -172 38 -146 C 70 -152 78 -112 48 -98 Z"/>
+    </g>
+    <g transform="translate(560 280) scale(0.42)">
+      <path d="M-92 40 L-104 8 L-84 0 L-100 -30 L-74 -34 L-82 -66 L-52 -62 L-50 -96 L-22 -84 L-10 -114 L12 -90 L34 -110 L44 -80 L72 -90 L70 -58 L98 -56 L86 -26 L108 -14 L88 10 L100 40 Z"/>
+      <ellipse cx="0" cy="20" rx="88" ry="78"/>
+    </g>
+  </g>
+  <g font-family="Apple SD Gothic Neo, Malgun Gothic, sans-serif" fill="#6B5A48">
+    <text x="32" y="48" font-size="22" font-weight="700">고슴도치 요리사 '도토'</text>
+    <text x="32" y="74" font-size="14">2.5등신, 굵은 외곽선 없이 평면 채색</text>
+    <text x="440" y="200" font-size="13">앞 / 옆 실루엣</text>
+    <path d="M404 186 C 420 176 428 178 436 190" fill="none" stroke="#6B5A48" stroke-width="1.5"/>
+    <text x="420" y="120" font-size="13">등불 = 체력 겸 시간</text>
+    <path d="M414 116 C 400 116 396 126 394 142" fill="none" stroke="#6B5A48" stroke-width="1.5"/>
+  </g>
+</svg>

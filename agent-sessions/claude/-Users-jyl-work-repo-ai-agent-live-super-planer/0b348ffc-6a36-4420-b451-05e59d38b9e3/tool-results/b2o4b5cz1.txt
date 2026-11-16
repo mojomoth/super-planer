@@ -1,0 +1,851 @@
+{
+  "name": "workflow-view",
+  "private": true,
+  "scripts": {"dev": "next dev -p 3102", "build": "next build", "start": "next start -p 3102", "test": "node --test --experimental-strip-types lib/*.test.ts"},
+  "dependencies": {"next": "16.4.6", "react": "19.3.1", "react-dom": "19.3.1", "@xyflow/react": "12.12.1", "@anthropic-ai/sdk": "^1.8.0"},
+  "devDependencies": {"typescript": "^5.9.0", "@types/node": "^24", "@types/react": "^19", "@types/react-dom": "^19"}
+}
+=== lib/schema.ts
+     1	import type { DatabaseSync } from 'node:sqlite';
+     2	
+     3	// workflow-view owns only the wf_* tables (see pocs/CONTRACT.md).
+     4	const DDL = `
+     5	CREATE TABLE IF NOT EXISTS wf_workflows (id TEXT PRIMARY KEY, title TEXT NOT NULL, source TEXT, created_at TEXT NOT NULL);
+     6	CREATE UNIQUE INDEX IF NOT EXISTS wf_workflows_source ON wf_workflows(source);
+     7	CREATE TABLE IF NOT EXISTS wf_cards (id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
+     8	  status TEXT NOT NULL, decision TEXT, x REAL NOT NULL, y REAL NOT NULL, expanded INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+     9	CREATE INDEX IF NOT EXISTS wf_cards_workflow ON wf_cards(workflow_id);
+    10	CREATE TABLE IF NOT EXISTS wf_edges (id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL);
+    11	CREATE INDEX IF NOT EXISTS wf_edges_workflow ON wf_edges(workflow_id);
+    12	CREATE TABLE IF NOT EXISTS wf_messages (id TEXT PRIMARY KEY, card_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
+    13	CREATE INDEX IF NOT EXISTS wf_messages_card ON wf_messages(card_id, created_at);
+    14	CREATE TABLE IF NOT EXISTS wf_link_previews (url TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT, description TEXT, image TEXT, site TEXT, fetched_at TEXT NOT NULL);
+    15	`;
+    16	
+    17	export function ensureSchema(d: DatabaseSync) {
+    18	  d.exec(DDL);
+    19	}
+=== lib/urls.ts
+     1	// URL helpers shared by the chat renderer (client) and the plan-doc hand-off (server).
+     2	
+     3	const URL_RE = /https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+,;=%()]+/g;
+     4	const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+     5	const IMAGE_HOSTS = new Set(['picsum.photos', 'images.unsplash.com']);
+     6	
+     7	/** Trim sentence punctuation and an unbalanced closing paren (markdown `[t](url)`, "(see https://x)"). */
+     8	export function trimUrl(raw: string): string {
+     9	  let u = raw.replace(/[.,;:!?*]+$/, '');
+    10	  while (u.endsWith(')') && (u.match(/\(/g)?.length ?? 0) < (u.match(/\)/g)?.length ?? 0)) {
+    11	    u = u.slice(0, -1).replace(/[.,;:!?*]+$/, '');
+    12	  }
+    13	  return u;
+    14	}
+    15	
+    16	/** Every distinct http(s) URL in the text, in order of appearance. */
+    17	export function extractUrls(text: string): string[] {
+    18	  const out: string[] = [];
+    19	  for (const m of text.matchAll(URL_RE)) {
+    20	    const u = trimUrl(m[0]);
+    21	    if (!isHttpUrl(u) || out.includes(u)) continue;
+    22	    out.push(u);
+    23	  }
+    24	  return out;
+    25	}
+    26	
+    27	export function isHttpUrl(s: string): boolean {
+    28	  try {
+    29	    const u = new URL(s);
+    30	    return (u.protocol === 'http:' || u.protocol === 'https:') && !!u.hostname;
+    31	  } catch {
+    32	    return false;
+    33	  }
+    34	}
+    35	
+    36	/** Image by file extension or by a known image host; such URLs render as <img> and are never fetched server-side. */
+    37	export function isImageUrl(s: string): boolean {
+    38	  try {
+    39	    const u = new URL(s);
+    40	    return IMAGE_EXT.test(u.pathname) || IMAGE_HOSTS.has(u.hostname);
+    41	  } catch {
+    42	    return false;
+    43	  }
+    44	}
+    45	
+    46	export function hostOf(s: string): string {
+    47	  try {
+    48	    return new URL(s).hostname.replace(/^www\./, '');
+    49	  } catch {
+    50	    return s;
+    51	  }
+    52	}
+=== lib/http.ts
+     1	// Small helpers for route handlers: JSON-only bodies (a cross-site form post cannot send application/json without a preflight).
+     2	
+     3	export const bad = (error: string, status = 400) => Response.json({ error }, { status });
+     4	
+     5	export async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
+     6	  if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return null;
+     7	  try {
+     8	    const b: unknown = await req.json();
+     9	    return b && typeof b === 'object' && !Array.isArray(b) ? (b as Record<string, unknown>) : null;
+    10	  } catch {
+    11	    return null;
+    12	  }
+    13	}
+    14	
+    15	/** Trimmed string within [min, max] chars, else null. */
+    16	export function str(v: unknown, min: number, max: number): string | null {
+    17	  if (typeof v !== 'string') return null;
+    18	  const s = v.trim();
+    19	  return s.length >= min && s.length <= max ? s : null;
+    20	}
+    21	
+    22	export const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && Math.abs(v) < 1e6 ? v : null);
+=== lib/agent.ts
+     1	// The card's sub-agent: replies in the chat and condenses the chat into a decision when the card is frozen.
+     2	import { completeJSON, type Provider } from './llm';
+     3	import { isHttpUrl, extractUrls } from './urls';
+     4	import { condense, parseBlocks } from './md';
+     5	import type { Card, Message } from './store';
+     6	
+     7	type Topic = { tips: string[]; page: string };
+     8	const TOPICS: [RegExp, Topic][] = [
+     9	  [/컨셉|개념|concept/i, { page: 'https://en.wikipedia.org/wiki/Game_design', tips: [
+    10	    '한 문장 소개를 먼저 정해요. "누가, 어디서, 무엇을 하는 게임"이면 충분해요.',
+    11	    '비슷한 게임 두 개를 고르고 둘과 다른 점 하나를 적어 봐요.',
+    12	    '플레이어가 처음 5분 동안 느낄 감정을 한 단어로 정해요.',
+    13	    '이 게임을 하지 않을 사람도 적어 보면 범위가 선명해져요.',
+    14	  ] }],
+    15	  [/루프|loop|반복/i, { page: 'https://en.wikipedia.org/wiki/Game_mechanics', tips: [
+    16	    '한 판을 행동 네 개로 쪼개고, 각 행동이 다음 행동의 재료가 되게 이어요.',
+    17	    '실패해도 남는 것 하나를 정해 두면 다시 하고 싶어져요.',
+    18	    '한 판 길이를 먼저 정하고 그 안에 들어갈 행동 수를 맞춰요.',
+    19	    '보상은 바로 쓰는 것과 모아 두는 것 두 종류로 나눠요.',
+    20	  ] }],
+    21	  [/캐릭터|인물|주인공|character/i, { page: 'https://en.wikipedia.org/wiki/Player_character', tips: [
+    22	    '주인공의 약점 하나가 플레이 방식이 되게 해요. 겁이 많으면 숨기 능력이 생기는 식이에요.',
+    23	    '이웃마다 원하는 것을 하나씩 정하면 부탁 퀘스트가 자연스럽게 생겨요.',
+    24	    '실루엣만 봐도 누구인지 알 수 있게 형태를 다르게 잡아요.',
+    25	    '말투 예시 문장을 캐릭터마다 두 줄씩 써 두면 대사 작업이 빨라져요.',
+    26	  ] }],
+    27	  [/레벨|맵|지도|스테이지|level/i, { page: 'https://en.wikipedia.org/wiki/Level_design', tips: [
+    28	    '방을 손으로 만든 조각으로 준비하고 순서만 섞으면 품질을 지키기 쉬워요.',
+    29	    '첫 방은 항상 안전하게 두고 규칙을 하나만 보여 줘요.',
+    30	    '돌아오는 길이 보이게 만들면 길을 잃는 스트레스가 줄어요.',
+    31	    '비밀 장소는 눈에 띄는 단서 하나로만 안내해요.',
+    32	  ] }],
+    33	  [/아트|그림|색|비주얼|art/i, { page: 'https://en.wikipedia.org/wiki/Concept_art', tips: [
+    34	    '색은 주인공용 강조색 하나와 배경색 셋으로 시작해요.',
+    35	    '같은 장면을 두 가지 스타일로 그려 비교한 뒤 고르는 게 빨라요.',
+    36	    '중요한 물건은 밝기 차이로 구분되게 해요. 색이 안 보이는 사람도 알아볼 수 있어요.',
+    37	    '참고 이미지를 세 장만 골라 팀 기준으로 삼아요.',
+    38	  ] }],
+    39	  [/수익|가격|돈|과금|monet/i, { page: 'https://en.wikipedia.org/wiki/Free-to-play', tips: [
+    40	    '처음엔 한 번 사는 가격 하나로 시작하고 추가 판매는 나중에 정해요.',
+    41	    '돈을 내면 빨라지는 것과 꾸밈만 바뀌는 것을 구분해요.',
+    42	    '비슷한 게임의 가격대를 세 개 찾아 비교해 봐요.',
+    43	  ] }],
+    44	  [/출시|범위|일정|release|scope/i, { page: 'https://en.wikipedia.org/wiki/Early_access', tips: [
+    45	    '첫 출시에 꼭 넣을 것 세 가지만 남기고 나머지는 업데이트로 미뤄요.',
+    46	    '플랫폼은 하나로 시작하면 테스트가 훨씬 쉬워요.',
+    47	    '친구 다섯 명에게 먼저 보여 줄 데모 범위를 정해요.',
+    48	  ] }],
+    49	  [/소리|사운드|음악|sound|music/i, { page: 'https://en.wikipedia.org/wiki/Video_game_music', tips: [
+    50	    '장소마다 음악 분위기를 한 단어로 정해요.',
+    51	    '중요한 행동에는 짧은 효과음을 붙여 손맛을 줘요.',
+    52	  ] }],
+    53	];
+    54	const DEFAULT_TOPIC: Topic = { page: 'https://en.wikipedia.org/wiki/Roguelike', tips: [
+    55	  '지금 정할 것 하나와 나중에 정할 것 하나를 나눠 적어요.',
+    56	  '비슷한 게임에서 좋았던 장면 하나를 골라 이유를 적어 봐요.',
+    57	  '플레이어가 이 부분에서 무엇을 느끼면 좋을지 한 단어로 정해요.',
+    58	] };
+    59	const PICSUM = [10, 15, 28, 40, 106, 152, 180, 237, 292, 433, 1015, 1043];
+    60	
+    61	function hash(s: string) {
+    62	  let h = 0;
+    63	  for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    64	  return h;
+    65	}
+    66	
+    67	/** Deterministic reply used for LLM_PROVIDER=mock and whenever the model fails. Always carries reference URLs. */
+    68	export function fallbackReply(card: Pick<Card, 'title' | 'description'>, userText: string, turn: number): string {
+    69	  const topic = TOPICS.find(([re]) => re.test(`${card.title} ${card.description}`))?.[1] ?? DEFAULT_TOPIC;
+    70	  const tips = [0, 1, 2].map((k) => topic.tips[(turn + k) % topic.tips.length]);
+    71	  const quote = userText.length > 40 ? `${userText.slice(0, 39)}…` : userText;
+    72	  const img = PICSUM[hash(`${card.title}${userText}`) % PICSUM.length];
+    73	  return `**${card.title}** 기준으로 "${quote}"에 맞춰 정리해 봤어요.
+    74	
+    75	${[...new Set(tips)].map((t) => `- ${t}`).join('\n')}
+    76	
+    77	마음에 드는 쪽을 골라 주면 그 방향으로 더 좁혀 볼게요.
+    78	
+    79	참고:
+    80	- https://picsum.photos/id/${img}/800/500
+    81	- ${topic.page}`;
+    82	}
+    83	
+    84	/** The agent's next message for a card, given the stored history (which already ends with the user's message). */
+    85	export async function agentReply(
+    86	  workflowTitle: string,
+    87	  card: Card,
+    88	  history: Message[],
+    89	): Promise<{ content: string; provider: Provider; error?: string }> {
+    90	  const userText = history.at(-1)?.content ?? '';
+    91	  const turn = history.filter((m) => m.role === 'user').length;
+    92	  const fallback = () => ({ reply: fallbackReply(card, userText, turn), references: [] as string[] });
+    93	  const system = `너는 게임 기획 팀의 하위 에이전트다. 게임 "${workflowTitle}"의 "${card.title}" 카드를 맡았다 (${card.description}).
+    94	15~20세도 바로 이해할 쉬운 한국어로, 구체적인 제안 2~4개를 짧게 답한다. 과장된 표현과 지어낸 수치는 쓰지 않는다.
+    95	참고 URL을 1~4개 고른다: 이미지는 https://picsum.photos/id/<0~1000>/800/500 형식, 페이지는 실제로 있는 위키백과나 공식 문서 주소만.
+    96	JSON만 출력한다: {"reply": "마크다운(문단, - 목록, **굵게**) 답변. URL은 넣지 않는다", "references": ["https://..."]}`;
+    97	  const transcript = history.slice(-12).map((m) => `${m.role === 'user' ? '사용자' : '에이전트'}: ${m.content}`).join('\n\n');
+    98	  const r = await completeJSON<{ reply?: unknown; references?: unknown }>(system, transcript, fallback);
+    99	
+   100	  const reply = typeof r.data?.reply === 'string' ? r.data.reply.trim().slice(0, 4000) : '';
+   101	  if (!reply) return { content: fallback().reply, provider: 'mock', error: r.error ?? 'model returned no reply' };
+   102	  const refs = (Array.isArray(r.data.references) ? r.data.references : [])
+   103	    .filter((u): u is string => typeof u === 'string' && u.length <= 500 && isHttpUrl(u) && !extractUrls(reply).includes(u))
+   104	    .slice(0, 4);
+   105	  const content = refs.length ? `${reply}\n\n참고:\n${refs.map((u) => `- ${u}`).join('\n')}` : reply;
+   106	  return { content, provider: r.provider, error: r.error };
+   107	}
+   108	
+   109	/** One to three sentences of what the chat settled on. Fallback: the last agent message, condensed. */
+   110	export async function decisionFor(card: Card, history: Message[]): Promise<{ decision: string; provider: Provider; error?: string }> {
+   111	  const lastAgent = [...history].reverse().find((m) => m.role === 'agent');
+   112	  // prefer the suggestions (list items) over the reply's framing sentences
+   113	  const gist = (text: string) => {
+   114	    const items = parseBlocks(text).flatMap((b) => (b.t === 'p' ? [] : b.items)).filter((i) => condense(i));
+   115	    return condense(items.length ? items.join('\n') : text);
+   116	  };
+   117	  const fallback = () => ({ decision: (lastAgent && gist(lastAgent.content)) || card.description || card.title });
+   118	  if (!history.length) return { decision: fallback().decision, provider: 'mock' };
+   119	  const system = `게임 기획 카드 "${card.title}" (${card.description})의 대화를 읽고, 합의된 결정을 한국어 1~3문장으로 요약한다.
+   120	결정이 분명하지 않으면 가장 최근 제안을 결정으로 적는다. URL과 지어낸 수치는 넣지 않는다. JSON만 출력한다: {"decision": "..."}`;
+   121	  const transcript = history.slice(-20).map((m) => `${m.role === 'user' ? '사용자' : '에이전트'}: ${m.content}`).join('\n\n');
+   122	  const r = await completeJSON<{ decision?: unknown }>(system, transcript, fallback);
+   123	  const decision = typeof r.data?.decision === 'string' ? r.data.decision.trim().slice(0, 800) : '';
+   124	  return decision ? { decision, provider: r.provider, error: r.error } : { ...fallback(), provider: 'mock', error: r.error };
+   125	}
+=== lib/store.ts
+     1	import { randomUUID } from 'node:crypto';
+     2	import { db, tableExists } from './db';
+     3	import { ensureSchema } from './schema';
+     4	import { SEED } from './seed';
+     5	
+     6	export type Status = 'active' | 'frozen' | 'cancelled';
+     7	export type Workflow = { id: string; title: string; source: string | null; created_at: string };
+     8	export type Card = {
+     9	  id: string; workflow_id: string; title: string; description: string; status: Status;
+    10	  decision: string | null; x: number; y: number; expanded: boolean; created_at: string;
+    11	};
+    12	export type Edge = { id: string; workflow_id: string; source: string; target: string };
+    13	export type Message = { id: string; card_id: string; role: 'user' | 'agent'; content: string; created_at: string };
+    14	
+    15	const g = globalThis as unknown as { __wfReady?: boolean };
+    16	
+    17	/** The shared DB with workflow-view's tables created and the sample workflow seeded. */
+    18	export function wf() {
+    19	  const d = db();
+    20	  if (!g.__wfReady) {
+    21	    ensureSchema(d);
+    22	    if (!d.prepare('SELECT 1 FROM wf_workflows LIMIT 1').get()) seed();
+    23	    g.__wfReady = true;
+    24	  }
+    25	  return d;
+    26	}
+    27	
+    28	/** BEGIN/COMMIT around fn; node:sqlite has no transaction helper. */
+    29	function tx<T>(fn: () => T): T {
+    30	  const d = db();
+    31	  d.exec('BEGIN IMMEDIATE');
+    32	  try {
+    33	    const r = fn();
+    34	    d.exec('COMMIT');
+    35	    return r;
+    36	  } catch (e) {
+    37	    d.exec('ROLLBACK');
+    38	    throw e;
+    39	  }
+    40	}
+    41	
+    42	const now = () => new Date().toISOString();
+    43	
+    44	// node:sqlite rows have a null prototype and INTEGER flags; normalise once here.
+    45	const toCard = (r: Record<string, unknown>): Card => ({
+    46	  id: String(r.id), workflow_id: String(r.workflow_id), title: String(r.title), description: String(r.description),
+    47	  status: r.status as Status, decision: (r.decision as string | null) ?? null, x: Number(r.x), y: Number(r.y),
+    48	  expanded: !!r.expanded, created_at: String(r.created_at),
+    49	});
+    50	const plain = <T,>(r: unknown) => ({ ...(r as object) }) as T;
+    51	
+    52	export function insertWorkflow(title: string, source: string | null): string {
+    53	  const id = randomUUID();
+    54	  db().prepare('INSERT INTO wf_workflows (id, title, source, created_at) VALUES (?, ?, ?, ?)').run(id, title, source, now());
+    55	  return id;
+    56	}
+    57	
+    58	export function insertCard(c: Omit<Card, 'id' | 'created_at' | 'expanded'> & { expanded?: boolean }, at = now()): Card {
+    59	  const id = randomUUID();
+    60	  db().prepare(
+    61	    'INSERT INTO wf_cards (id, workflow_id, title, description, status, decision, x, y, expanded, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    62	  ).run(id, c.workflow_id, c.title, c.description, c.status, c.decision, c.x, c.y, c.expanded ? 1 : 0, at);
+    63	  return { ...c, id, expanded: !!c.expanded, created_at: at };
+    64	}
+    65	
+    66	export function insertEdge(workflowId: string, source: string, target: string): Edge {
+    67	  const id = randomUUID();
+    68	  db().prepare('INSERT INTO wf_edges (id, workflow_id, source, target) VALUES (?, ?, ?, ?)').run(id, workflowId, source, target);
+    69	  return { id, workflow_id: workflowId, source, target };
+    70	}
+    71	
+    72	export function insertMessage(cardId: string, role: Message['role'], content: string, at = now()): Message {
+    73	  const id = randomUUID();
+    74	  db().prepare('INSERT INTO wf_messages (id, card_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)').run(id, cardId, role, content, at);
+    75	  return { id, card_id: cardId, role, content, created_at: at };
+    76	}
+    77	
+    78	export function getCard(id: string): Card | null {
+    79	  const r = wf().prepare('SELECT * FROM wf_cards WHERE id = ?').get(id);
+    80	  return r ? toCard(r) : null;
+    81	}
+    82	
+    83	export function cardMessages(cardId: string): Message[] {
+    84	  return wf().prepare('SELECT * FROM wf_messages WHERE card_id = ? ORDER BY created_at, rowid').all(cardId).map((r) => plain<Message>(r));
+    85	}
+    86	
+    87	export function getWorkflow(id: string): Workflow | null {
+    88	  const r = wf().prepare('SELECT * FROM wf_workflows WHERE id = ?').get(id);
+    89	  return r ? plain<Workflow>(r) : null;
+    90	}
+    91	
+    92	export function listWorkflows(): Workflow[] {
+    93	  return wf().prepare('SELECT * FROM wf_workflows ORDER BY created_at DESC').all().map((r) => plain<Workflow>(r));
+    94	}
+    95	
+    96	export function loadWorkflow(id: string) {
+    97	  const workflow = getWorkflow(id);
+    98	  if (!workflow) return null;
+    99	  const d = wf();
+   100	  const cards = d.prepare('SELECT * FROM wf_cards WHERE workflow_id = ? ORDER BY created_at, rowid').all(id).map(toCard);
+   101	  const edges = d.prepare('SELECT * FROM wf_edges WHERE workflow_id = ?').all(id).map((r) => plain<Edge>(r));
+   102	  const messages = d
+   103	    .prepare('SELECT m.* FROM wf_messages m JOIN wf_cards c ON c.id = m.card_id WHERE c.workflow_id = ? ORDER BY m.created_at, m.rowid')
+   104	    .all(id)
+   105	    .map((r) => plain<Message>(r));
+   106	  return { workflow, cards, edges, messages };
+   107	}
+   108	
+   109	function seed() {
+   110	  tx(() => {
+   111	    const wid = insertWorkflow(SEED.title, 'seed');
+   112	    const ids: Record<string, string> = {};
+   113	    const t0 = Date.now() - 60 * 60 * 1000;
+   114	    SEED.cards.forEach((c, i) => {
+   115	      const at = (k: number) => new Date(t0 + i * 6 * 60 * 1000 + k * 60 * 1000).toISOString();
+   116	      const card = insertCard({ workflow_id: wid, title: c.title, description: c.description, status: c.status, decision: c.decision ?? null, x: c.x, y: c.y }, at(0));
+   117	      ids[c.key] = card.id;
+   118	      c.messages.forEach(([role, content], k) => insertMessage(card.id, role, content, at(k)));
+   119	    });
+   120	    for (const [a, b] of SEED.edges) insertEdge(wid, ids[a], ids[b]);
+   121	  });
+   122	}
+   123	
+   124	// ---------- step1 import ----------
+   125	
+   126	const TRACKS: Record<string, string> = {
+   127	  genre: '장르', core_loop: '코어 루프', loop: '코어 루프', goal: '목표', player: '플레이어', audience: '대상',
+   128	  setting: '배경', world: '세계관', character: '캐릭터', characters: '캐릭터', art: '아트', art_style: '아트', mood: '분위기',
+   129	  tone: '분위기', platform: '플랫폼', controls: '조작', progression: '성장', difficulty: '난이도', session: '플레이 시간',
+   130	  monetization: '수익 모델', scope: '범위', story: '이야기', fun: '재미', twist: '차별점', differentiation: '차별점',
+   131	};
+   132	
+   133	const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+   134	
+   135	function answerText(raw: unknown): string {
+   136	  if (typeof raw !== 'string' || !raw) return '';
+   137	  try {
+   138	    const a = JSON.parse(raw) as { choices?: unknown; text?: unknown };
+   139	    const parts = [...(Array.isArray(a.choices) ? a.choices.map(String) : []), typeof a.text === 'string' ? a.text.trim() : ''];
+   140	    return parts.filter(Boolean).join(', ');
+   141	  } catch {
+   142	    return raw;
+   143	  }
+   144	}
+   145	
+   146	/** Create (once per session) a workflow from step1's tables. */
+   147	export function importStep1(sessionId: string): { id: string } | { error: string } {
+   148	  const source = `step1:${sessionId}`;
+   149	  const d = wf();
+   150	  const existing = d.prepare('SELECT id FROM wf_workflows WHERE source = ?').get(source);
+   151	  if (existing) return { id: String(existing.id) };
+   152	  if (!tableExists('step1_sessions') || !tableExists('step1_turns')) {
+   153	    return { error: '질문하기 기록이 아직 없어요. 질문하기에서 먼저 답변을 끝내 주세요.' };
+   154	  }
+   155	  const session = d.prepare('SELECT * FROM step1_sessions WHERE id = ?').get(sessionId);
+   156	  if (!session) return { error: '그 질문하기 기록을 찾지 못했어요. 예시 워크플로우를 보여 드려요.' };
+   157	  const turns = d.prepare('SELECT * FROM step1_turns WHERE session_id = ? AND answer IS NOT NULL ORDER BY idx').all(sessionId);
+   158	  const result = tableExists('step1_results') ? d.prepare('SELECT * FROM step1_results WHERE session_id = ?').get(sessionId) : undefined;
+   159	
+   160	  let concept: { what?: string; analogy?: string; details?: string[]; so_what?: string } = {};
+   161	  try {
+   162	    concept = result ? JSON.parse(String(result.concept)) : {};
+   163	  } catch {
+   164	    /* keep empty; the one-liner still carries the concept */
+   165	  }
+   166	  const prompt = String(session.prompt);
+   167	  const gameTitle = result ? String(result.title) : short(prompt, 30);
+   168	  const oneLiner = result ? String(result.one_liner) : prompt;
+   169	
+   170	  return tx(() => {
+   171	    const wid = insertWorkflow(gameTitle, source);
+   172	    const PER_ROW = 4;
+   173	    const pos = (i: number) => ({ x: (i % PER_ROW) * 360, y: Math.floor(i / PER_ROW) * 280 });
+   174	    const t0 = Date.now();
+   175	    const at = (i: number, k: number) => new Date(t0 + i * 1000 + k).toISOString();
+   176	
+   177	    const conceptCard = insertCard({
+   178	      workflow_id: wid, title: `컨셉: ${short(gameTitle, 24)}`, description: short(oneLiner, 200),
+   179	      status: result ? 'frozen' : 'active', decision: result ? (concept.what ? `${oneLiner}\n\n${concept.what}` : oneLiner) : null, ...pos(0),
+   180	    }, at(0, 0));
+   181	    insertMessage(conceptCard.id, 'user', prompt, at(0, 1));
+   182	    if (result) {
+   183	      const body = [
+   184	        concept.what, concept.analogy && `비유로 말하면: ${concept.analogy}`,
+   185	        Array.isArray(concept.details) && concept.details.length ? concept.details.map((x) => `- ${x}`).join('\n') : '',
+   186	        concept.so_what && `그래서 좋은 점: ${concept.so_what}`,
+   187	      ].filter(Boolean).join('\n\n');
+   188	      insertMessage(conceptCard.id, 'agent', `**${gameTitle}**\n\n${oneLiner}${body ? `\n\n${body}` : ''}`, at(0, 2));
+   189	    }
+   190	
+   191	    let prev = conceptCard.id;
+   192	    turns.forEach((t, n) => {
+   193	      const i = n + 1;
+   194	      const question = String(t.question);
+   195	      const answer = answerText(t.answer) || '(답변 없음)';
+   196	      const track = typeof t.track === 'string' ? t.track : '';
+   197	      const card = insertCard({
+   198	        workflow_id: wid, title: TRACKS[track] ?? short(question, 20), description: question,
+   199	        status: 'frozen', decision: answer, ...pos(i),
+   200	      }, at(i, 0));
+   201	      insertMessage(card.id, 'agent', t.hint ? `${question}\n\n${String(t.hint)}` : question, at(i, 1));
+   202	      insertMessage(card.id, 'user', answer, at(i, 2));
+   203	      insertEdge(wid, prev, card.id);
+   204	      prev = card.id;
+   205	    });
+   206	    return { id: wid };
+   207	  });
+   208	}
+=== lib/preview.ts
+     1	// Server-side link preview with an SSRF guard. Every hop (first URL and each redirect) is re-checked,
+     2	// and the DNS answer is checked inside the socket's own lookup, so a rebinding name cannot slip past.
+     3	import http from 'node:http';
+     4	import https from 'node:https';
+     5	import dns from 'node:dns';
+     6	import net from 'node:net';
+     7	import zlib from 'node:zlib';
+     8	import type { Readable } from 'node:stream';
+     9	
+    10	export type Preview = {
+    11	  url: string;
+    12	  kind: 'image' | 'page';
+    13	  title: string | null;
+    14	  description: string | null;
+    15	  image: string | null;
+    16	  site: string | null;
+    17	};
+    18	
+    19	const MAX_BYTES = 1024 * 1024;
+    20	const MAX_REDIRECTS = 3;
+    21	const TIMEOUT_MS = 5000;
+    22	
+    23	// Two lists: a v6 rule like ::ffff:0:0/96 would otherwise also match every plain IPv4 address.
+    24	const blocked4 = new net.BlockList();
+    25	const blocked6 = new net.BlockList();
+    26	const embeds4 = new net.BlockList(); // v6 prefixes whose last 32 bits are an IPv4 address: judge that address
+    27	for (const [a, p] of [
+    28	  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12],
+    29	  ['192.0.0.0', 24], ['192.0.2.0', 24], ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
+    30	  ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
+    31	] as const) blocked4.addSubnet(a, p, 'ipv4');
+    32	for (const [a, p] of [
+    33	  ['::', 96], // unspecified, loopback, IPv4-compatible
+    34	  ['64:ff9b:1::', 48], ['100::', 64], ['2001::', 32], ['2001:db8::', 32], ['2002::', 16],
+    35	  ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8],
+    36	] as const) blocked6.addSubnet(a, p, 'ipv6');
+    37	embeds4.addSubnet('::ffff:0:0', 96, 'ipv6'); // IPv4-mapped
+    38	embeds4.addSubnet('64:ff9b::', 96, 'ipv6'); // NAT64 well-known prefix (DNS64 networks answer with it)
+    39	
+    40	/** True for anything that is not a public unicast address (loopback, private, link-local/metadata, CGNAT, …). */
+    41	export function isBlockedIp(ip: string): boolean {
+    42	  const v = net.isIP(ip);
+    43	  if (!v) return true;
+    44	  if (v === 4) return blocked4.check(ip, 'ipv4');
+    45	  if (embeds4.check(ip, 'ipv6')) {
+    46	    // URL normalises to compressed hex, so the last two groups are the low 32 bits ("::" → 0)
+    47	    const g = new URL(`http://[${ip}]/`).hostname.slice(1, -1).split(':').slice(-2).map((x) => parseInt(x || '0', 16));
+    48	    return isBlockedIp(`${g[0] >> 8}.${g[0] & 255}.${g[1] >> 8}.${g[1] & 255}`);
+    49	  }
+    50	  return blocked6.check(ip, 'ipv6');
+    51	}
+    52	
+    53	class BlockedError extends Error {}
+    54	
+    55	function assertAllowed(u: URL) {
+    56	  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new BlockedError(`protocol ${u.protocol} not allowed`);
+    57	  if (u.username || u.password) throw new BlockedError('credentials in URL not allowed');
+    58	  if (u.port && u.port !== '80' && u.port !== '443') throw new BlockedError(`port ${u.port} not allowed`);
+    59	  const host = u.hostname.replace(/^\[|\]$/g, '');
+    60	  if (net.isIP(host) && isBlockedIp(host)) throw new BlockedError(`address ${host} not allowed`);
+    61	}
+    62	
+    63	type LookupCb = (err: NodeJS.ErrnoException | null, address: string | dns.LookupAddress[], family?: number) => void;
+    64	const guardedLookup = ((hostname: string, options: dns.LookupOptions, cb: LookupCb) => {
+    65	  dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
+    66	    if (err) return cb(err, '');
+    67	    const bad = addrs.find((a) => isBlockedIp(a.address));
+    68	    if (!addrs.length || bad) return cb(new BlockedError(`${hostname} resolves to a blocked address`), '');
+    69	    if (options.all) cb(null, addrs);
+    70	    else cb(null, addrs[0].address, addrs[0].family);
+    71	  });
+    72	}) as unknown as net.LookupFunction;
+    73	
+    74	function get(u: URL, signal: AbortSignal): Promise<http.IncomingMessage> {
+    75	  return new Promise((resolve, reject) => {
+    76	    const req = (u.protocol === 'https:' ? https : http).get(u, {
+    77	      agent: false,
+    78	      lookup: guardedLookup,
+    79	      signal,
+    80	      headers: {
+    81	        'user-agent': 'SuperPlanerLinkPreview/0.1',
+    82	        accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5',
+    83	        'accept-encoding': 'gzip, deflate, br',
+    84	      },
+    85	    });
+    86	    req.on('response', resolve);
+    87	    req.on('error', reject);
+    88	  });
+    89	}
+    90	
+    91	function readCapped(res: http.IncomingMessage): Promise<Buffer> {
+    92	  const enc = String(res.headers['content-encoding'] ?? '').toLowerCase();
+    93	  const stream: Readable =
+    94	    enc === 'gzip' ? res.pipe(zlib.createGunzip())
+    95	    : enc === 'deflate' ? res.pipe(zlib.createInflate())
+    96	    : enc === 'br' ? res.pipe(zlib.createBrotliDecompress())
+    97	    : res;
+    98	  return new Promise((resolve, reject) => {
+    99	    const chunks: Buffer[] = [];
+   100	    let size = 0;
+   101	    let done = false;
+   102	    const finish = () => {
+   103	      if (done) return;
+   104	      done = true;
+   105	      res.destroy();
+   106	      resolve(Buffer.concat(chunks).subarray(0, MAX_BYTES));
+   107	    };
+   108	    stream.on('data', (c: Buffer) => {
+   109	      chunks.push(c);
+   110	      size += c.length;
+   111	      if (size >= MAX_BYTES) finish(); // shortcut: parse only the first 1MB, enough for <head>
+   112	    });
+   113	    stream.on('end', finish);
+   114	    const fail = (e: Error) => {
+   115	      if (done) return;
+   116	      done = true;
+   117	      reject(e);
+   118	    };
+   119	    stream.on('error', fail);
+   120	    if (stream !== res) res.on('error', fail);
+   121	  });
+   122	}
+   123	
+   124	function decode(buf: Buffer, contentType: string): string {
+   125	  const sniff = buf.subarray(0, 2048).toString('latin1');
+   126	  const label =
+   127	    /charset=["']?([\w-]+)/i.exec(contentType)?.[1] ?? /<meta[^>]+charset=["']?([\w-]+)/i.exec(sniff)?.[1] ?? 'utf-8';
+   128	  try {
+   129	    return new TextDecoder(label).decode(buf);
+   130	  } catch {
+   131	    return new TextDecoder('utf-8').decode(buf);
+   132	  }
+   133	}
+   134	
+   135	const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'" };
+   136	function decodeEntities(s: string): string {
+   137	  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+|#39);/gi, (m, e: string) => {
+   138	    if (e[0] === '#') {
+   139	      const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+   140	      return Number.isFinite(n) && n > 0 && n < 0x110000 ? String.fromCodePoint(n) : m;
+   141	    }
+   142	    return ENTITIES[e.toLowerCase()] ?? m;
+   143	  });
+   144	}
+   145	
+   146	function attr(tag: string, name: string): string | null {
+   147	  const m = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, 'i').exec(tag);
+   148	  return m ? (m[1] ?? m[2] ?? m[3]) : null;
+   149	}
+   150	
+   151	const clip = (s: string | undefined | null, n: number) => {
+   152	  const t = s?.replace(/\s+/g, ' ').trim();
+   153	  return t ? (t.length > n ? `${t.slice(0, n - 1)}…` : t) : null;
+   154	};
+   155	
+   156	/** og:/twitter:/<title> metadata from an HTML string. Relative og:image resolves against `base`. */
+   157	export function parseMeta(html: string, base: URL): Omit<Preview, 'url' | 'kind'> {
+   158	  const metas = new Map<string, string>();
+   159	  for (const m of html.matchAll(/<meta\b[^>]*>/gi)) {
+   160	    const key = (attr(m[0], 'property') ?? attr(m[0], 'name'))?.toLowerCase();
+   161	    const content = attr(m[0], 'content');
+   162	    if (key && content !== null && !metas.has(key)) metas.set(key, decodeEntities(content));
+   163	  }
+   164	  const titleTag = /<title[^>]*>([^<]*)<\/title>/i.exec(html)?.[1];
+   165	  let image: string | null = null;
+   166	  const rawImage = metas.get('og:image') ?? metas.get('og:image:url') ?? metas.get('twitter:image');
+   167	  if (rawImage) {
+   168	    try {
+   169	      const iu = new URL(rawImage, base);
+   170	      if (iu.protocol === 'http:' || iu.protocol === 'https:') image = iu.href;
+   171	    } catch {
+   172	      /* ignore a broken og:image */
+   173	    }
+   174	  }
+   175	  return {
+   176	    title: clip(metas.get('og:title') ?? metas.get('twitter:title') ?? (titleTag ? decodeEntities(titleTag) : null), 200),
+   177	    description: clip(metas.get('og:description') ?? metas.get('twitter:description') ?? metas.get('description'), 400),
+   178	    image,
+   179	    site: clip(metas.get('og:site_name'), 80) ?? base.hostname.replace(/^www\./, ''),
+   180	  };
+   181	}
+   182	
+   183	/** Fetch a page's preview. Throws on a blocked target, a non-2xx, a non-HTML body or a timeout. */
+   184	export async function fetchPreview(raw: string): Promise<Preview> {
+   185	  let u = new URL(raw);
+   186	  const signal = AbortSignal.timeout(TIMEOUT_MS);
+   187	  for (let hop = 0; ; hop++) {
+   188	    assertAllowed(u);
+   189	    const res = await get(u, signal);
+   190	    const status = res.statusCode ?? 0;
+   191	    if (status >= 300 && status < 400 && res.headers.location) {
+   192	      res.resume();
+   193	      if (hop >= MAX_REDIRECTS) throw new Error('too many redirects');
+   194	      u = new URL(res.headers.location, u);
+   195	      continue;
+   196	    }
+   197	    if (status < 200 || status >= 300) {
+   198	      res.resume();
+   199	      throw new Error(`HTTP ${status}`);
+   200	    }
+   201	    const type = String(res.headers['content-type'] ?? '');
+   202	    if (/^image\//i.test(type)) {
+   203	      res.destroy();
+   204	      return { url: raw, kind: 'image', title: null, description: null, image: u.href, site: u.hostname };
+   205	    }
+   206	    if (!/text\/html|application\/xhtml\+xml/i.test(type)) {
+   207	      res.destroy();
+   208	      throw new Error(`not HTML (${type || 'no content-type'})`);
+   209	    }
+   210	    const html = decode(await readCapped(res), type);
+   211	    return { url: raw, kind: 'page', ...parseMeta(html, u) };
+   212	  }
+   213	}
+=== lib/md.ts
+     1	// Tiny markdown-ish parser for chat messages: paragraphs, bullet/numbered lists, **bold**, [text](url), bare URLs.
+     2	// Returns plain data; the React side renders it, so no HTML string is ever injected.
+     3	import { trimUrl } from './urls.ts';
+     4	
+     5	export type Inline =
+     6	  | { t: 'text'; v: string }
+     7	  | { t: 'bold'; v: string }
+     8	  | { t: 'link'; v: string; href: string }
+     9	  | { t: 'url'; href: string };
+    10	
+    11	export type Block = { t: 'p'; lines: string[] } | { t: 'ul' | 'ol'; items: string[] };
+    12	
+    13	const BULLET = /^\s*[-*•]\s+(.*)$/;
+    14	const NUMBER = /^\s*\d+[.)]\s+(.*)$/;
+    15	
+    16	export function parseBlocks(text: string): Block[] {
+    17	  const blocks: Block[] = [];
+    18	  for (const chunk of text.replace(/\r\n/g, '\n').split(/\n\s*\n/)) {
+    19	    const lines = chunk.split('\n').filter((l) => l.trim());
+    20	    let para: string[] = [];
+    21	    let list: { t: 'ul' | 'ol'; items: string[] } | null = null;
+    22	    const flush = () => {
+    23	      if (para.length) blocks.push({ t: 'p', lines: para });
+    24	      if (list) blocks.push(list);
+    25	      para = [];
+    26	      list = null;
+    27	    };
+    28	    for (const line of lines) {
+    29	      const b = BULLET.exec(line);
+    30	      const n = b ? null : NUMBER.exec(line);
+    31	      const kind = b ? 'ul' : n ? 'ol' : null;
+    32	      if (kind) {
+    33	        if (para.length || (list && list.t !== kind)) flush();
+    34	        list ??= { t: kind, items: [] };
+    35	        list.items.push((b ?? n)![1]);
+    36	      } else {
+    37	        if (list) flush();
+    38	        para.push(line.trim());
+    39	      }
+    40	    }
+    41	    flush();
+    42	  }
+    43	  return blocks;
+    44	}
+    45	
+    46	const INLINE_RE = /\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+,;=%()]+)/g;
+    47	
+    48	export function parseInline(line: string): Inline[] {
+    49	  const out: Inline[] = [];
+    50	  let last = 0;
+    51	  for (const m of line.matchAll(INLINE_RE)) {
+    52	    let end = m.index + m[0].length;
+    53	    let tok: Inline;
+    54	    if (m[1] !== undefined) tok = { t: 'bold', v: m[1] };
+    55	    else if (m[2] !== undefined) tok = { t: 'link', v: m[2], href: m[3] };
+    56	    else {
+    57	      const u = trimUrl(m[4]); // trailing punctuation / unbalanced ")" stays as text
+    58	      end = m.index + u.length;
+    59	      tok = { t: 'url', href: u };
+    60	    }
+    61	    if (m.index > last) out.push({ t: 'text', v: line.slice(last, m.index) });
+    62	    out.push(tok);
+    63	    last = end;
+    64	  }
+    65	  if (last < line.length) out.push({ t: 'text', v: line.slice(last) });
+    66	  return out;
+    67	}
+    68	
+    69	/** Plain-text gist of a message: no URLs, markdown marks or "참고" lines, cut at a sentence end near `max`. */
+    70	export function condense(text: string, max = 220): string {
+    71	  const flat = text
+    72	    .replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/g, '$1')
+    73	    .split('\n')
+    74	    .map((l) => l.replace(/https?:\/\/\S+/g, '').replace(/\*\*/g, '').replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').trim())
+    75	    .filter((l) => l && !/^(참고|분위기 참고|비슷한 구조)\s*:?$/.test(l) && !/:\s*$/.test(l))
+    76	    .join(' ')
+    77	    .replace(/\s+/g, ' ')
+    78	    .trim();
+    79	  if (flat.length <= max) return flat;
+    80	  const cut = flat.slice(0, max);
+    81	  const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('요 '), cut.lastIndexOf('다 '));
+    82	  return end > max / 3 ? cut.slice(0, end + 1).trim() : `${cut.trimEnd()}…`;
+    83	}
+=== lib/urls.test.ts
+     1	// node --test --experimental-strip-types lib/*.test.ts
+     2	import { test } from 'node:test';
+     3	import assert from 'node:assert/strict';
+     4	import { extractUrls, isImageUrl, hostOf } from './urls.ts';
+     5	import { parseBlocks, parseInline, condense } from './md.ts';
+     6	
+     7	test('extractUrls finds, trims and dedupes http(s) URLs', () => {
+     8	  const text = [
+     9	    '참고: https://en.wikipedia.org/wiki/Roguelike, 그리고 (https://github.com/xyflow/xyflow).',
+    10	    '마크다운 [링크](https://example.com/a?b=1&c=2) 와 https://en.wikipedia.org/wiki/Rogue_(video_game)!',
+    11	    '중복 https://en.wikipedia.org/wiki/Roguelike 와 ftp://nope.example 와 javascript:alert(1)',
+    12	    '**https://picsum.photos/id/10/800/500**',
+    13	  ].join('\n');
+    14	  assert.deepEqual(extractUrls(text), [
+    15	    'https://en.wikipedia.org/wiki/Roguelike',
+    16	    'https://github.com/xyflow/xyflow',
+    17	    'https://example.com/a?b=1&c=2',
+    18	    'https://en.wikipedia.org/wiki/Rogue_(video_game)',
+    19	    'https://picsum.photos/id/10/800/500',
+    20	  ]);
+    21	  assert.deepEqual(extractUrls('URL 없음'), []);
+    22	});
+    23	
+    24	test('isImageUrl by extension or image host', () => {
+    25	  assert.equal(isImageUrl('https://picsum.photos/id/1/800/500'), true);
+    26	  assert.equal(isImageUrl('https://images.unsplash.com/photo-1?w=800'), true);
+    27	  assert.equal(isImageUrl('http://localhost:3102/samples/garden-map.svg'), true);
+    28	  assert.equal(isImageUrl('https://x.com/a.PNG?v=2'), true);
+    29	  assert.equal(isImageUrl('https://en.wikipedia.org/wiki/Roguelike'), false);
+    30	  assert.equal(isImageUrl('not a url'), false);
+    31	  assert.equal(hostOf('https://www.github.com/x'), 'github.com');
+    32	});
+    33	
+    34	test('parseBlocks splits paragraphs and lists', () => {
+    35	  const blocks = parseBlocks('첫 줄\n둘째 줄\n\n- 하나\n- 둘\n1. 가\n2. 나\n끝');
+    36	  assert.deepEqual(blocks, [
+    37	    { t: 'p', lines: ['첫 줄', '둘째 줄'] },
+    38	    { t: 'ul', items: ['하나', '둘'] },
+    39	    { t: 'ol', items: ['가', '나'] },
+    40	    { t: 'p', lines: ['끝'] },
+    41	  ]);
+    42	});
+    43	
+    44	test('parseInline handles bold, links and bare URLs with trailing punctuation', () => {
+    45	  assert.deepEqual(parseInline('**굵게** 보기 [위키](https://en.wikipedia.org/wiki/X) https://a.com/b.'), [
+    46	    { t: 'bold', v: '굵게' },
+    47	    { t: 'text', v: ' 보기 ' },
+    48	    { t: 'link', v: '위키', href: 'https://en.wikipedia.org/wiki/X' },
+    49	    { t: 'text', v: ' ' },
+    50	    { t: 'url', href: 'https://a.com/b' },
+    51	    { t: 'text', v: '.' },
+    52	  ]);
+    53	});
+    54	
+    55	test('condense strips URLs, markdown and reference labels', () => {
+    56	  const msg = '그럼 위협을 **시간**으로 둬요.\n\n- 등불이 꺼지면 귀환\n\n참고:\n- https://en.wikipedia.org/wiki/Cozy_game\n지도 시안: http://localhost:3102/samples/a.svg';
+    57	  assert.equal(condense(msg), '그럼 위협을 시간으로 둬요. 등불이 꺼지면 귀환');
+    58	  const long = '가나다라마바사. '.repeat(40);
+    59	  const out = condense(long, 100);
+    60	  assert.ok(out.length <= 100 && out.endsWith('.'), out);
+    61	});
+=== lib/preview.test.ts
+     1	// SSRF guard self-check (no network needed: every target here must be refused before or at connect time).
+     2	import { test } from 'node:test';
+     3	import assert from 'node:assert/strict';
+     4	import { isBlockedIp, fetchPreview, parseMeta } from './preview.ts';
+     5	
+     6	test('isBlockedIp rejects private, loopback, link-local, CGNAT, metadata, v6 local', () => {
+     7	  for (const ip of [
+     8	    '127.0.0.1', '10.0.0.5', '172.16.3.4', '172.31.255.255', '192.168.1.1', '169.254.169.254', '100.64.0.1',
+     9	    '100.100.100.200', '0.0.0.0', '224.0.0.1', '255.255.255.255',
+    10	    '::1', '::', 'fe80::1', 'fc00::1', 'fd00:ec2::254', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:10.0.0.1', '64:ff9b::a9fe:a9fe', '64:ff9b::7f00:1', 'ff02::1',
+    11	    'not-an-ip',
+    12	  ]) assert.equal(isBlockedIp(ip), true, ip);
+    13	  for (const ip of ['93.184.216.34', '8.8.8.8', '172.32.0.1', '100.128.0.1', '2606:4700:4700::1111', '64:ff9b::14c8:f5f7', '::ffff:8.8.8.8']) {
+    14	    assert.equal(isBlockedIp(ip), false, ip);
+    15	  }
+    16	});
+    17	
+    18	test('fetchPreview refuses blocked targets', async () => {
+    19	  for (const url of [
+    20	    'http://127.0.0.1/',
+    21	    'http://localhost:80/',
+    22	    'http://localhost/',
+    23	    'http://[::1]/',
+    24	    'http://[::ffff:127.0.0.1]/',
+    25	    'http://169.254.169.254/latest/meta-data/',
+    26	    'http://0x7f000001/',
+    27	    'http://2130706433/',
+    28	    'http://10.1.2.3/',
+    29	    'http://example.com:3102/',
+    30	    'http://user:pw@example.com/',
+    31	    'file:///etc/passwd',
+    32	    'ftp://example.com/',
+    33	  ]) {
+    34	    await assert.rejects(fetchPreview(url), Error, url);
+    35	  }
+    36	});
+    37	
+    38	test('parseMeta reads og tags, entities and resolves relative images', () => {
+    39	  const html = `<html><head><title>Fallback</title>
+    40	    <meta property="og:title" content="Rogue &amp; Friends">
+    41	    <meta name="description" content='짧은 설명'>
+    42	    <meta property="og:image" content="/img/cover.png">
+    43	    <meta property="og:site_name" content="Wiki"></head></html>`;
+    44	  assert.deepEqual(parseMeta(html, new URL('https://example.com/a/b')), {
+    45	    title: 'Rogue & Friends',
+    46	    description: '짧은 설명',
+    47	    image: 'https://example.com/img/cover.png',
+    48	    site: 'Wiki',
+    49	  });
+    50	  const bare = parseMeta('<title>Only title</title><meta property="og:image" content="javascript:alert(1)">', new URL('https://www.x.org/'));
+    51	  assert.deepEqual(bare, { title: 'Only title', description: null, image: null, site: 'x.org' });
+    52	});

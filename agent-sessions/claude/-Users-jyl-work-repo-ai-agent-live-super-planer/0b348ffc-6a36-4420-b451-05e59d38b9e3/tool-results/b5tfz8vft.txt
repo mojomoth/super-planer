@@ -1,0 +1,779 @@
+# Super Planer PoC contract
+
+Three Next.js 16 (App Router, TypeScript) apps in one npm workspace (`pocs/`). Dependencies are already installed at `pocs/node_modules`. **Do not run `npm install` or add dependencies** — if something is truly missing, say so in your report.
+
+| App | Dir | Port | Job |
+|---|---|---|---|
+| Step1 | `pocs/step1` | 3101 | vibe prompt → Socratic Q/A → game title + concept (ELI5) |
+| Workflow view | `pocs/workflow-view` | 3102 | n8n-style canvas, cards = agent chat sessions, URL previews |
+| Plan doc | `pocs/plan-doc` | 3103 | decision docs + images → Markdown plan doc with preview |
+
+Run all: `cd pocs && npm run dev`. One app: `npm run dev -w step1`.
+
+## Shared pieces (already written, identical in each app — do not rename)
+
+- `lib/db.ts` — `db()` returns a `node:sqlite` `DatabaseSync` on `pocs/.data/super-planer.db` (WAL). `tableExists(name)`. Every app creates **only its own tables** (`CREATE TABLE IF NOT EXISTS`) in its own `lib/schema.ts`, and reads other apps' tables only after `tableExists`.
+- `lib/llm.ts` — `completeJSON(system, user, fallback)` → `{ data, provider, error? }`. Provider: `ANTHROPIC_API_KEY` → local `claude` CLI → `mock`. `LLM_PROVIDER=mock` forces the deterministic path. **Every LLM feature must have a good deterministic fallback**, so each PoC is fully usable with `LLM_PROVIDER=mock`. Show the active provider in the UI as a quiet text label (not a badge with a dot).
+- `node:sqlite` only works in server code (route handlers, server components, server actions). Add `export const runtime = 'nodejs'` to route handlers that touch it.
+- Shared visual system: `pocs/shared/tokens.css` + `pocs/DESIGN.md`. Each app's `app/globals.css` starts with `@import "../../shared/tokens.css";`. Logo files: `super-planer/assets/super-planer-logo.svg`, `super-planer-icon.svg` (copy into the app's `public/`).
+
+## Tables (prefix = owner)
+
+```sql
+-- step1 (owner: step1)
+step1_sessions(id TEXT PRIMARY KEY, prompt TEXT NOT NULL, status TEXT NOT NULL,  -- 'interviewing' | 'done'
+               ambiguity REAL, created_at TEXT NOT NULL)
+step1_turns(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, idx INTEGER NOT NULL,
+            track TEXT,            -- ambiguity track, e.g. 'core_loop'
+            question TEXT NOT NULL, -- ELI5 question text
+            hint TEXT,              -- one-line analogy/help
+            options TEXT NOT NULL,  -- JSON string[] of choices
+            allow_free INTEGER NOT NULL DEFAULT 1,
+            answer TEXT,            -- JSON {choices: string[], text: string} or NULL while open
+            created_at TEXT NOT NULL)
+step1_results(session_id TEXT PRIMARY KEY, title TEXT NOT NULL, one_liner TEXT NOT NULL,
+              concept TEXT NOT NULL, -- JSON {what, analogy, details: string[], so_what, decisions: {track, decision}[]}
+              created_at TEXT NOT NULL)
+
+-- workflow-view (owner: workflow-view)
+wf_workflows(id TEXT PRIMARY KEY, title TEXT NOT NULL, source TEXT, created_at TEXT NOT NULL) -- source e.g. 'step1:<session_id>' or 'seed'
+wf_cards(id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
+         status TEXT NOT NULL,     -- 'active' (진행중) | 'frozen' (동결) | 'cancelled' (취소)
+         decision TEXT,            -- summary written when frozen
+         x REAL NOT NULL, y REAL NOT NULL, expanded INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)
+wf_edges(id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL)
+wf_messages(id TEXT PRIMARY KEY, card_id TEXT NOT NULL, role TEXT NOT NULL, -- 'user' | 'agent'
+            content TEXT NOT NULL, created_at TEXT NOT NULL)
+wf_link_previews(url TEXT PRIMARY KEY, kind TEXT NOT NULL, -- 'image' | 'page'
+                 title TEXT, description TEXT, image TEXT, site TEXT, fetched_at TEXT NOT NULL)
+
+-- plan-doc (owner: plan-doc)
+plan_inputs(id TEXT PRIMARY KEY, kind TEXT NOT NULL,  -- 'decision' | 'image'
+            title TEXT NOT NULL, body TEXT,            -- decision markdown/text
+            url TEXT,                                  -- image URL (/samples/..., /uploads/..., or https)
+            source TEXT, created_at TEXT NOT NULL)      -- 'seed' | 'upload' | 'wf:<workflow_id>' | 'step1:<session_id>'
+plan_docs(id TEXT PRIMARY KEY, title TEXT NOT NULL, markdown TEXT NOT NULL, provider TEXT, created_at TEXT NOT NULL)
+```
+
+## Hand-offs between apps (plain links, absolute localhost URLs)
+
+- step1 result screen → "워크플로우로 열기" → `http://localhost:3102/?from=step1:<session_id>`. workflow-view imports that session (one card per answered Q/A turn plus a concept card, chained by edges, cards for answered turns start `frozen` with `decision` = the answer) if `step1_*` tables exist; idempotent per source.
+- workflow-view toolbar → "기획서 만들기" → `http://localhost:3103/?workflow=<workflow_id>`. plan-doc imports every `frozen` card's `decision` (+ the card's title) as `decision` inputs, and every image URL found in that card's messages as `image` inputs; idempotent per source.
+- Each app also works standalone with seed data (a sample game) so it can be reviewed alone.
+- A small shared header in each app: logo, the three PoC names as links to the three ports, current one marked.
+
+## Code rules (ponytail)
+
+Follow `.claude/skills/ponytail/SKILL.md` (level: full): smallest complete change, platform features before code, no speculative abstractions/config, no new deps. Never cut: input validation at trust boundaries, SSRF guard on server-side URL fetching, error handling, accessibility. Non-trivial pure logic (question engine, URL extraction, markdown assembly) gets one small `node --test` / assert self-check file (`lib/*.test.ts` run with `node --test --experimental-strip-types`, or `.mjs`).
+
+## UI rules (hallmark)
+
+Follow `.claude/skills/hallmark/SKILL.md` **The Floor** and `pocs/DESIGN.md`. These are product tool UIs (not landing pages): Floor items about the hero/80-word limit apply to each app's first screen loosely; everything else applies strictly. Korean UI copy, plain and specific — no marketing voice, no emoji icons, no invented numbers. Lint before hand-back: `node ../.claude/skills/hallmark/scripts/sloplint.mjs <app>/app` (static checks; `--render` needs puppeteer which is not installed — skip it).
+# Design: Super Planer PoCs
+
+The locked system for `step1` (3101), `workflow-view` (3102) and `plan-doc` (3103). Every screen reads this first and the three apps share it. Change it on purpose; the file is the rule. Source of truth for values: `pocs/shared/tokens.css` (each app's `app/globals.css` starts with `@import "../../shared/tokens.css";`, which also loads the fonts and every shared class below). Write app-specific CSS only for what this file does not cover, and only with tokens.
+
+## System
+
+- Genre: modern-minimal. Shape: app screen (tools people work in, not landing pages). Lint with `--scope app`.
+- Theme: Cobalt, re-tuned to the brand: cool near-white paper, blue-grey hairlines, one indigo signal (`#4F46E5`, the logo fill), keycap buttons with a real bottom edge, panels cut on two opposite corners.
+- Direction: calm, precise, a little playful. Calm = one accent, hairlines instead of boxes, nothing moves unless the state changed. Precise = tabular figures, fixed control heights, every state named. Playful = keys that sink when pressed, a frozen card that visibly locks.
+- Axes: light/grotesk-sans/cool, posture restrained, modes light + dark (`prefers-color-scheme`).
+- Signature: the workflow card that is a chat session and gets frozen into a decision. Step1 and plan-doc feed it and read from it, so they reuse its pieces (chat, status, gallery).
+
+## Tokens
+
+| Role | Token | Light | Dark | Use |
+| --- | --- | --- | --- | --- |
+| Page | `--color-paper` | oklch(98.7% 0.004 272) | oklch(16.5% 0.014 272) | body, header |
+| Sunken | `--color-paper-2` | 96.4% | 13.5% | workflow canvas, side rails |
+| Well | `--color-paper-3` | 93.6% | 25% | hover fill, inline code, image wells, seg tray |
+| Raised | `--color-surface` | 99.4% | 20.5% | panels, cards, inputs |
+| Text | `--color-ink` / `--color-ink-2` / `--color-muted` | 21.4% (`#151923`) / 38% / 50% | 94% / 82% / 71% | body / secondary / meta, placeholders, field edges |
+| Lines | `--color-rule` / `--color-rule-2` | 90.5% / 84% | 30% / 39% | hairlines / key and chip borders |
+| Accent | `--color-accent` (+ `-hover`, `-edge`) | oklch(51.1% 0.23 277) = `#4F46E5` | oklch(70% 0.15 277) | primary fill, focus, selection, current tab |
+| Accent text | `--color-accent-text` on `--color-accent-wash` | 46% on 95.4% | 80% on 28% | links, selected chip, current nav, user bubble wash |
+| On accent | `--color-accent-ink` | 98.8% | 16% | text on the primary fill |
+| States | `--color-frozen` (+`-wash`), `--color-error` (+`-wash`) | teal 46% h222, red 51% h27 | 78%, 72% | 동결, errors |
+| Canvas | `--color-canvas-dot`, `--color-edge`, `--color-edge-active` | | | dot grid, connectors (3:1 on paper-2) |
+| Code | `--color-graphite`, `--color-graphite-ink`, `--color-graphite-accent` | | | `<pre>` blocks only |
+
+All text pairs above are checked at 4.5:1 or better in both modes; focus ring and connectors at 3:1. Never write a colour or `font-family` literal outside `tokens.css`.
+
+**Fonts.** `--font-body` = `--font-display` = IBM Plex Sans KR (400/500/600/700, Google Fonts, falls back to Apple SD Gothic Neo / Malgun Gothic). `--font-mono` = JetBrains Mono, only for code, URLs and machine values, never for labels. One family carries the UI; hierarchy comes from size and weight. Korean wrapping is `word-break: keep-all` on body.
+
+**Type scale** (ratio 1.2, fixed, no fluid heads): `--text-xs` 12px (who-labels, URLs) · `--text-sm` 14px (controls, labels, meta, chat) · `--text-md` 16px (body, inputs) · `--text-lg` 19px (h3, card title when expanded) · `--text-xl` 23px (h2, current question) · `--text-2xl` 28px (h1 page title) · `--text-3xl` 33px (game title, document h1). Heads 600, line-height 1.3, tracking -0.012em; body 1.6; long-form doc 1.75.
+
+**Spacing** `--space-3xs` 2 · `-2xs` 4 · `-xs` 8 · `-sm` 12 · `-md` 16 · `-lg` 24 · `-xl` 40 · `-2xl` 64 · `-3xl` 96. Every padding, margin and gap is a token. Gutter `--gutter` 24px (16px under 40rem), container 1440px, header 56px.
+
+**Radii** one per nesting level: `--radius-card` 12px (panel, workflow card; cut corners `--cut-l` where `corner-shape` is supported) · `--radius-inner` 8px (bubble, image, notice) · `--radius-input` 6px (buttons, inputs, chips) · `--radius-mark` 4px (inline code, seg buttons). No pills.
+
+**Elevation.** Paper steps and hairlines first. `--shadow-card` (1px) on panels, `--shadow-raised` only on a dragged or selected workflow card and popovers, `--shadow-key` (2px hard edge) on keys. Dark mode drops soft shadows: elevation is lightness plus a ring.
+
+## Motion
+
+- Character: calm. Motion only reports a state change. Durations `--dur-micro` 120ms (press, hover, colour), `--dur-short` 220ms (tab underline, card expand content fade), `--dur-long` 420ms (a connector drawing in once). Easing `--ease-out`; no bounce, no parallax, no reveal on load.
+- Animate only `transform` and `opacity` (never `width`/`height`/`top`/`left`, never `transition: all`). Card expand: switch layout instantly, fade the body in with opacity.
+- `prefers-reduced-motion: reduce` collapses every duration (handled in `tokens.css`); keys stop sinking and the skeleton stops pulsing.
+
+## Copy
+
+Korean, plain and specific: the verb and its object (`동결`, `되돌리기`, `기획서 만들기`, `다음 질문`). No emoji, no marketing voice, no invented numbers. No `A · B · C` meta strings (use line breaks or separate elements), no arrows glued to labels (`열기 →`), no uppercase or letter-spaced labels, no small line above a heading announcing it. Provider shows as quiet text in the header aside: `LLM: mock`.
+
+## Components (classes live in `tokens.css`)
+
+Icons are inline SVG, 24 viewBox, `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"`. One set, these paths:
+
+| Icon | Paths |
+| --- | --- |
+| 진행중 (clock) | `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>` |
+| 동결 (lock) | `<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>` |
+| 취소 (slash) | `<circle cx="12" cy="12" r="9"/><path d="M6 6l12 12"/>` |
+| 되돌리기 (undo) | `<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>` |
+| check | `<path d="m5 12 5 5 9-10"/>` |
+| expand / collapse | `<path d="m6 9 6 6 6-6"/>` / `<path d="m6 15 6-6 6 6"/>` |
+| prev / next | `<path d="m15 6-6 6 6 6"/>` / `<path d="m9 6 6 6-6 6"/>` |
+| agent | `<rect x="4" y="6" width="16" height="12" rx="3"/><path d="M9 11v2M15 11v2"/>` |
+| link | `<path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>` |
+| alert | `<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/>` |
+
+### App shell and header
+
+Copy `assets/super-planer-icon.svg` into `public/`. The wordmark is live text so it works in dark mode. Mark the current app with `aria-current="page"`.
+
+```html
+<body><div class="app-shell">
+  <header class="app-header">
+    <a class="app-brand" href="/"><img src="/super-planer-icon.svg" alt="" width="28" height="28"><span class="app-brand__name">Super Planer</span></a>
+    <nav class="app-nav" aria-label="PoC 이동"><ul>
+      <li><a href="http://localhost:3101/" aria-current="page">질문하기</a></li>
+      <li><a href="http://localhost:3102/">워크플로우</a></li>
+      <li><a href="http://localhost:3103/">기획서</a></li>
+    </ul></nav>
+    <p class="app-header__aside">LLM: mock</p>
+  </header>
+  <main class="app-main">            <!-- workflow-view: class="app-main app-main--full" -->
+    <div class="page-head"><div class="page-head__text"><h1>…</h1><p class="page-head__desc">…</p></div><div class="btn-row">…</div></div>
+    …
+  </main>
+</div></body>
+```
+
+### Buttons
+
+`.btn` is the secondary keycap. Modifiers: `.btn--primary` (one per screen: the screen's main action), `.btn--ghost` (toolbar and card-level quiet actions), `.btn--danger` (red text keycap, destructive), `.btn--sm` (32px, hit area padded to 44px), `.btn--icon` (square; needs `aria-label`). Group with `.btn-row`. Always `type="button"` or `type="submit"`. Loading: keep the label, set `aria-busy="true"` and `disabled`.
+
+```html
+<button type="submit" class="btn btn--primary">다음 질문</button>
+<button type="button" class="btn">건너뛰기</button>
+<button type="button" class="btn btn--ghost btn--sm"><svg …undo/>되돌리기</button>
+<button type="button" class="btn btn--danger btn--sm">삭제</button>
+<button type="button" class="btn btn--ghost btn--icon btn--sm" aria-label="카드 펼치기" aria-expanded="false"><svg …expand/></button>
+```
+
+### Text fields
+
+Visible label above every field; placeholder shows an example, never the instruction. Error: `aria-invalid="true"` + `aria-describedby` to `.field__error`. `.input` and `.btn` share 40px.
+
+```html
+<div class="field">
+  <label class="field__label" for="prompt">어떤 게임을 만들고 싶나요?</label>
+  <textarea class="textarea" id="prompt" name="prompt" rows="4" placeholder="예: 고양이가 우주 농장을 운영하는 느긋한 게임" aria-describedby="prompt-help"></textarea>
+  <p class="field__help" id="prompt-help">한두 문장이면 충분해요.</p>
+</div>
+```
+
+### Choices (selectable chips)
+
+A `<fieldset class="choices">` of `<label class="chip">` around a real radio (one answer) or checkbox (several). `.choices--stack` puts long options one per row. The check icon appears when chosen, so selection is not colour alone. Mixed answer = choices plus a `.field` textarea under them (`직접 쓰기`).
+
+```html
+<fieldset class="choices choices--stack">
+  <legend>플레이어가 가장 많이 하는 행동은?</legend>
+  <label class="chip"><input type="radio" name="q3" value="a"><svg class="chip__check" …check/>밭을 가꾸고 수확하기</label>
+  <label class="chip"><input type="radio" name="q3" value="b"><svg class="chip__check" …check/>다른 행성과 거래하기</label>
+</fieldset>
+```
+
+### Segmented toggle and tabs
+
+`.seg` switches a view of the same content (gallery 슬라이드/격자): `<div class="seg" role="group" aria-label="보기 방식"><button type="button" aria-pressed="true">슬라이드</button><button type="button" aria-pressed="false">격자</button></div>`.
+
+`.tabs` switches panels (plan-doc 미리보기/마크다운). Arrow keys move between tabs; only the selected tab has `tabindex="0"`.
+
+```html
+<div class="tabs" role="tablist" aria-label="기획서 보기">
+  <button type="button" role="tab" class="tab" id="t-prev" aria-selected="true" aria-controls="p-prev">미리보기</button>
+  <button type="button" role="tab" class="tab" id="t-md" aria-selected="false" aria-controls="p-md" tabindex="-1">마크다운</button>
+</div>
+<div class="tab-panel" role="tabpanel" id="p-prev" aria-labelledby="t-prev">…</div>
+```
+
+### Panel
+
+The one container. Never a panel inside a panel (or inside a workflow card): inside, use hairlines (`.panel__head`, `.panel__foot`) and spacing.
+
+```html
+<section class="panel" aria-labelledby="dec-h">
+  <header class="panel__head"><h2 class="panel__title" id="dec-h">결정 문서</h2><div class="panel__actions">…</div></header>
+  <div class="panel__body">…</div>
+  <footer class="panel__foot">…</footer>
+</section>
+```
+
+### Status label
+
+Text plus one icon, coloured by state. No dots, no filled pill. Card state values map `active` → 진행중, `frozen` → 동결, `cancelled` → 취소.
+
+```html
+<span class="status status--active"><svg …clock/>진행중</span>
+<span class="status status--frozen"><svg …lock/>동결</span>
+<span class="status status--cancelled"><svg …slash/>취소</span>
+```
+
+### Chat session
+
+Agent turns are plain text with a who-label; user turns are an indigo-wash bubble on the right. URLs in a message render as links (`.url` for a bare long URL) and their previews follow as a `.gallery` inside the same `<li>`. Composer send is `.btn` (the screen's primary stays the toolbar action).
+
+```html
+<ol class="chat" aria-label="대화">
+  <li class="msg msg--agent">
+    <p class="msg__who"><svg …agent/>에이전트</p>
+    <div class="msg__body"><p>참고 화면을 모았어요. <a class="url" href="https://example.com/a">https://example.com/a</a></p></div>
+    <!-- .gallery here when the message has URLs -->
+  </li>
+  <li class="msg msg--user"><p class="msg__who visually-hidden">나</p><div class="msg__body"><p>두 번째 느낌이 좋아요.</p></div></li>
+</ol>
+<form class="composer"><label class="visually-hidden" for="c1">메시지</label><textarea class="textarea" id="c1" name="message" rows="1"></textarea><button type="submit" class="btn">보내기</button></form>
+```
+
+### Gallery (link and image previews)
+
+Slide view scrolls with snap (prev/next buttons call `scrollBy` on the track; no autoplay); grid view is 3 columns, 2 in narrow containers. Tiles are not cards: an image well plus two text lines. A page without an image shows the link icon in the well; the site line is the hostname. Links open with `target="_blank" rel="noopener noreferrer"`. Images: `loading="lazy"`, `alt` = page title or `""` when the title is right below.
+
+```html
+<section class="gallery" aria-label="링크 미리보기">
+  <div class="gallery__bar">
+    <p class="meta">미리보기 3개</p>
+    <div class="seg" role="group" aria-label="보기 방식">…</div>
+  </div>
+  <ul class="gallery__track" data-view="slide">   <!-- or data-view="grid" -->
+    <li class="preview"><a class="preview__link" href="…" target="_blank" rel="noopener noreferrer">
+      <span class="preview__media"><img src="…" alt="" loading="lazy" width="640" height="400"></span>
+      <span class="preview__title">우주 농장 콘셉트 아트</span>
+      <span class="preview__site">example.com</span>
+    </a></li>
+  </ul>
+  <div class="btn-row"><button type="button" class="btn btn--ghost btn--icon btn--sm" aria-label="이전">…prev</button><button type="button" class="btn btn--ghost btn--icon btn--sm" aria-label="다음">…next</button></div>
+</section>
+```
+
+### Markdown document
+
+Wrap rendered markdown in `<article class="md-doc">`. Measure 72ch, h2 with a hairline under it, images inline with a hairline outline, tables with horizontal rules only, code blocks on graphite. Markdown images `![alt](url)` must render as real `<img>` with the alt.
+
+### Notices and states
+
+Every region that loads has four states. Loading: `<span class="skeleton" style="width: 60%"></span>` lines in the shape of what comes (plus `aria-busy="true"` on the region). Empty: `<div class="empty"><p>아직 카드가 없어요.</p><button class="btn">예시 불러오기</button></div>`. Error: `<div class="notice notice--error" role="alert"><svg …alert/><p>질문을 만들지 못했어요. 다시 시도해 주세요.</p></div>`. Info: `.notice`. Secondary text: `.meta`. Success is the result itself, never a toast.
+
+## Screens (per app, layout only)
+
+- **step1** (`.app-main`, one column capped at 720px): first screen is a `.field` textarea + `.btn--primary` `질문 시작`. Interview: answered turns as `.chat` (agent question, user answer), current question below as `h2` at `--text-xl` + hint as `.meta` + `.choices` + optional textarea + `.btn-row` (`다음 질문` primary, `이전` ghost). Progress is a quiet `.meta` line (`질문 3 / 7`), no bar of dots. Result: game title `h1` at `--text-3xl`, one-liner at `--text-lg`, the ELI5 parts in an `.md-doc` (한 줄 요약, 비유로 말하면, 자세히, 그래서 뭐가 좋아?, 결정한 것들 as a table), then `워크플로우로 열기` as `.btn--primary` link.
+- **workflow-view** (`.app-main--full`): a toolbar row (workflow title, `.btn--primary` `기획서 만들기`, ghost actions) over the canvas. Canvas: `--color-paper-2` with a 16px dot grid in `--color-canvas-dot` (`radial-gradient(circle, var(--color-canvas-dot) 1px, transparent 1.5px) 0 0 / 16px 16px`). Card `<article class="panel node" data-status="active">`: 280px wide collapsed, 440px expanded, absolutely positioned by `transform: translate(x, y)`. Head: `.status` + `h3` title (`--text-md`, 600) + description (`.meta`, 2-line clamp) + actions (`btn--icon` expand with `aria-expanded`, `.btn--sm` `동결`, ghost `.btn--sm` `되돌리기`/`취소`). Expanded body: `.chat` capped at 360px with its own scroll, then `.composer`; a frozen card shows its decision on top as a `.notice` and hides the composer. `data-status="frozen"` sets the border to `--color-frozen`; `cancelled` sets `--color-paper-2` fill and a line-through on the title (text stays at full contrast). Ports: 10px squares, `--color-surface` fill, `--color-rule-2` border, at the vertical centre of the left and right edges. Edges: SVG cubic paths, 1.5px `--color-edge`, an edge into an active card `--color-edge-active`, into a cancelled card dashed; draw-in once with `stroke-dashoffset` at `--dur-long`, none under reduced motion. Dragged card: `--shadow-raised`, `cursor: grabbing`. Keyboard: cards are focusable, arrow keys nudge by 16px.
+- **plan-doc** (`.app-main`): two columns `minmax(0, 360px) minmax(0, 1fr)` at 60rem and up, stacked below. Left: inputs as `.panel`s (결정 문서 list with title + `.meta` source, 이미지 as `.gallery` grid, add/upload controls) and `.btn--primary` `기획서 생성`. Right: `.tabs` 미리보기 / 마크다운; preview is `<article class="md-doc">`, markdown is `<textarea class="textarea textarea--code">` with `min-height: 60dvh`; saved versions as a `.meta` list.
+
+## Exports
+
+`pocs/shared/tokens.css` only. Lint: `node .claude/skills/hallmark/scripts/sloplint.mjs <app>/app --scope app` (static tier; `--render` needs puppeteer, not installed). A screen that needs something new amends this file under `## Variants` instead of overriding locally.
+/* Hallmark · shape: app screen · genre: modern-minimal · theme: Cobalt (deal: manual, the brand indigo #4F46E5 replaces cobalt hue 258 with 277)
+ * nav: top bar, logo and the three PoC links, current marked by an indigo wash · signature: the workflow card that is a chat session, frozen into a decision · states: loading, empty, error, full
+ * axes: light/grotesk-sans/cool · posture: restrained · contrast: pass · modes: light+dark · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V3 · weakest: V, a cool hairline tool register is familiar; kept for a daily planning tool, and the play lives in keycap presses and the lock state of a frozen card instead of ornament */
+/* Hallmark · waive 74 · brand indigo #4F46E5 is the logo symbol fill in assets/super-planer-logo.svg · Super Planer ships this exact indigo, so the accent keeps it */
+
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+/* ---------- tokens ---------- */
+:root {
+  color-scheme: light dark;
+
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px; --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px; --space-3xl: 96px;
+  --text-xs: 0.75rem; --text-sm: 0.875rem; --text-md: 1rem; --text-lg: 1.2rem; --text-xl: 1.44rem; --text-2xl: 1.728rem; --text-3xl: 2.074rem;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms; --dur-short: 220ms; --dur-long: 420ms;
+  --container: 1440px; --gutter: 24px; --header-h: 56px;
+  --control-h: 40px; --control-h-sm: 32px;
+  --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400;
+
+  --font-body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+  --font-display: var(--font-body);
+  --font-mono: "JetBrains Mono", "D2Coding", ui-monospace, monospace;
+
+  --color-paper: oklch(98.7% 0.004 272);
+  --color-paper-2: oklch(96.4% 0.007 272);
+  --color-paper-3: oklch(93.6% 0.010 272);
+  --color-surface: oklch(99.4% 0.003 272);
+  --color-ink: oklch(21.4% 0.021 268);
+  --color-ink-2: oklch(38% 0.022 270);
+  --color-muted: oklch(50% 0.020 270);
+  --color-rule: oklch(90.5% 0.009 272);
+  --color-rule-2: oklch(84% 0.012 272);
+
+  --color-brand: oklch(51.1% 0.230 277);
+  --color-accent: oklch(51.1% 0.230 277);
+  --color-accent-hover: oklch(46% 0.215 277);
+  --color-accent-edge: oklch(37% 0.170 277);
+  --color-accent-text: oklch(46% 0.215 277);
+  --color-accent-wash: oklch(95.4% 0.028 277);
+  --color-accent-ink: oklch(98.8% 0.006 277);
+  --color-focus: oklch(51.1% 0.230 277);
+
+  --color-frozen: oklch(46% 0.090 222);
+  --color-frozen-wash: oklch(95.6% 0.020 222);
+  --color-error: oklch(51% 0.190 27);
+  --color-error-wash: oklch(96% 0.022 27);
+
+  --color-key-face: oklch(99.4% 0.003 272);
+  --color-key-hover: oklch(97% 0.006 272);
+  --color-key-edge: oklch(80% 0.014 272);
+
+  --color-graphite: oklch(21.4% 0.021 268);
+  --color-graphite-ink: oklch(93% 0.010 272);
+  --color-graphite-accent: oklch(80% 0.100 277);
+
+  --color-canvas-dot: oklch(84% 0.012 272);
+  --color-edge: oklch(62% 0.025 272);
+  --color-edge-active: oklch(51.1% 0.230 277);
+
+  --radius-card: 12px; --radius-inner: 8px; --radius-input: 6px; --radius-mark: 4px;
+  --cut: 6px; --cut-l: 14px;
+  --rule-hair: 1px;
+  --shadow-card: 0 1px 2px oklch(21% 0.021 268 / 0.06);
+  --shadow-raised: 0 6px 16px -6px oklch(21% 0.021 268 / 0.22);
+  --shadow-key: 0 2px 0 0 var(--color-key-edge);
+  --shadow-key-accent: 0 2px 0 0 var(--color-accent-edge);
+  --shadow-key-press: inset 0 1px 2px oklch(21% 0.021 268 / 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: oklch(16.5% 0.014 272);
+    --color-paper-2: oklch(13.5% 0.012 272);
+    --color-paper-3: oklch(25% 0.018 272);
+    --color-surface: oklch(20.5% 0.016 272);
+    --color-ink: oklch(94% 0.008 272);
+    --color-ink-2: oklch(82% 0.014 272);
+    --color-muted: oklch(71% 0.018 272);
+    --color-rule: oklch(30% 0.016 272);
+    --color-rule-2: oklch(39% 0.018 272);
+
+    --color-accent: oklch(70% 0.150 277);
+    --color-accent-hover: oklch(75% 0.130 277);
+    --color-accent-edge: oklch(50% 0.170 277);
+    --color-accent-text: oklch(80% 0.110 277);
+    --color-accent-wash: oklch(28% 0.070 277);
+    --color-accent-ink: oklch(16% 0.030 277);
+    --color-focus: oklch(72% 0.150 277);
+
+    --color-frozen: oklch(78% 0.090 215);
+    --color-frozen-wash: oklch(26% 0.040 222);
+    --color-error: oklch(72% 0.150 25);
+    --color-error-wash: oklch(27% 0.060 25);
+
+    --color-key-face: oklch(24% 0.018 272);
+    --color-key-hover: oklch(28% 0.020 272);
+    --color-key-edge: oklch(11% 0.012 272);
+
+    --color-graphite: oklch(11.5% 0.012 268);
+    --color-graphite-ink: oklch(92% 0.010 272);
+    --color-graphite-accent: oklch(80% 0.100 277);
+
+    --color-canvas-dot: oklch(32% 0.018 272);
+    --color-edge: oklch(52% 0.025 272);
+    --color-edge-active: oklch(72% 0.150 277);
+
+    --shadow-card: inset 0 0 0 1px oklch(100% 0 0 / 0.02);
+    --shadow-raised: 0 0 0 1px var(--color-rule-2);
+    --shadow-key-press: inset 0 1px 2px oklch(0% 0 0 / 0.4);
+  }
+}
+
+/* ---------- base ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { overflow-x: clip; }
+html { accent-color: var(--color-accent); scrollbar-color: var(--color-rule-2) var(--color-paper); -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; min-height: 100dvh; background: var(--color-paper); color: var(--color-ink);
+  font-family: var(--font-body); font-size: var(--text-md); line-height: 1.6;
+  word-break: keep-all; overflow-wrap: break-word; -webkit-font-smoothing: antialiased; caret-color: var(--color-accent);
+}
+::selection { background: color-mix(in oklab, var(--color-accent) 24%, transparent); color: var(--color-ink); }
+:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
+h1, h2, h3, h4 { margin: 0; font-family: var(--font-display); font-weight: 600; font-synthesis: none; letter-spacing: -0.012em; line-height: 1.3; overflow-wrap: break-word; min-width: 0; color: var(--color-ink); }
+h1 { font-size: var(--text-2xl); text-wrap: balance; } h2 { font-size: var(--text-xl); text-wrap: balance; } h3 { font-size: var(--text-lg); } h4 { font-size: var(--text-md); }
+p { margin: 0; text-wrap: pretty; }
+ul, ol { margin: 0; }
+img, video { max-width: 100%; height: auto; display: block; }
+svg { flex: none; }
+[hidden] { display: none !important; }
+button, input, select, textarea { font: inherit; color: inherit; }
+code, kbd, pre, .mono { font-family: var(--font-mono); }
+.num { font-variant-numeric: tabular-nums; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* ---------- app shell ---------- */
+.app-shell { min-height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.app-main { width: 100%; max-width: var(--container); margin-inline: auto; padding: var(--space-lg) var(--gutter) var(--space-2xl); }
+.app-main--full { max-width: none; padding: 0; }
+.page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-md); margin-bottom: var(--space-lg); }
+.page-head__text { display: grid; gap: var(--space-2xs); min-width: 0; }
+.page-head__desc { color: var(--color-ink-2); max-width: 60ch; }
+
+.app-header {
+  position: sticky; top: 0; z-index: var(--z-sticky-nav);
+  display: flex; align-items: center; gap: var(--space-lg);
+  height: var(--header-h); padding-inline: var(--gutter);
+  background: var(--color-paper); border-bottom: var(--rule-hair) solid var(--color-rule);
+}
+.app-brand { display: inline-flex; align-items: center; gap: var(--space-xs); border-radius: var(--radius-input); color: var(--color-ink); font-weight: 700; font-size: var(--text-md); line-height: 1; letter-spacing: -0.01em; text-decoration: none; white-space: nowrap; }
+.app-brand img { width: 28px; height: 28px; }
+.app-nav { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.app-nav ul { display: flex; gap: var(--space-2xs); padding: 0; list-style: none; }
+.app-nav a {
+  display: inline-flex; align-items: center; min-height: var(--control-h-sm); padding: 0 var(--space-sm);
+  border-radius: var(--radius-input); color: var(--color-ink-2); font-size: var(--text-sm); font-weight: 500; line-height: 1;
+  text-decoration: none; white-space: nowrap;
+  transition: color var(--dur-micro) var(--ease-out), background-color var(--dur-micro) var(--ease-out);
+}
+@media (hover: hover) { .app-nav a:hover { color: var(--color-ink); background: var(--color-paper-3); } }
+.app-nav a:active { background: var(--color-rule); }
+.app-nav a[aria-current="page"] { color: var(--color-accent-text); background: var(--color-accent-wash); }
+.app-header__aside { margin-left: auto; color: var(--color-muted); font-size: var(--text-sm); white-space: nowrap; }
+@media (max-width: 40rem) {
+  :root { --gutter: 16px; }
+  .app-header { gap: var(--space-sm); }
+  .app-brand__name, .app-header__aside { display: none; }
+}
+
+/* ---------- buttons (keycaps) ---------- */
+.btn {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-xs);
+  min-height: var(--control-h); padding: 0 var(--space-md);
+  border: var(--rule-hair) solid var(--color-rule-2); border-radius: var(--radius-input);
+  background: var(--color-key-face); color: var(--color-ink); box-shadow: var(--shadow-key);
+  font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500; line-height: 1;
+  white-space: nowrap; text-decoration: none; cursor: pointer;
+  transition: transform var(--dur-micro) var(--ease-out), box-shadow var(--dur-micro) var(--ease-out), background-color var(--dur-micro) var(--ease-out);
+}
+.btn svg { width: 16px; height: 16px; }
+@media (hover: hover) { .btn:hover { background: var(--color-key-hover); } }
+.btn:active { transform: translateY(2px); box-shadow: var(--shadow-key-press); }
+.btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; transform: none; box-shadow: none; }
+.btn[aria-busy="true"] { cursor: progress; }
+
+.btn--primary { background: var(--color-accent); border-color: var(--color-accent-edge); color: var(--color-accent-ink); box-shadow: var(--shadow-key-accent); }
+@media (hover: hover) { .btn--primary:hover { background: var(--color-accent-hover); } }
+
+.btn--ghost { background: transparent; border-color: transparent; box-shadow: none; color: var(--color-ink-2); }
+@media (hover: hover) { .btn--ghost:hover { background: var(--color-paper-3); color: var(--color-ink); } }
+.btn--ghost:active { transform: none; background: var(--color-rule); box-shadow: none; }
+
+.btn--danger { color: var(--color-error); }
+@media (hover: hover) { .btn--danger:hover { background: var(--color-error-wash); } }
+
+.btn--sm { min-height: var(--control-h-sm); padding: 0 var(--space-sm); }
+.btn--sm::after { content: ""; position: absolute; inset: calc(var(--space-2xs) * -1.5) 0; }
+.btn--icon { padding: 0; width: var(--control-h); }
+.btn--icon.btn--sm { width: var(--control-h-sm); }
+.btn--icon.btn--sm::after { inset: calc(var(--space-2xs) * -1.5); }
+.btn-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs); }
+
+/* ---------- fields ---------- */
+.field { display: grid; gap: var(--space-2xs); min-width: 0; }
+.field__label { font-size: var(--text-sm); font-weight: 500; color: var(--color-ink); }
+.field__help { min-height: 1lh; font-size: var(--text-sm); color: var(--color-muted); }
+.field__error { min-height: 1lh; font-size: var(--text-sm); color: var(--color-error); }
+.input, .textarea, .select {
+  width: 100%; border: var(--rule-hair) solid var(--color-muted); border-radius: var(--radius-input);
+  background: var(--color-surface); color: var(--color-ink); font-size: var(--text-md); line-height: 1.5;
+  outline: 2px solid transparent; outline-offset: -2px;
+  transition: background-color var(--dur-micro) var(--ease-out), border-color var(--dur-micro) var(--ease-out);
+}
+.input, .select { height: var(--control-h); padding: 0 var(--space-sm); }
+.textarea { display: block; min-height: calc(var(--control-h) * 2.4); padding: var(--space-xs) var(--space-sm); resize: vertical; }
+.textarea--code { font-family: var(--font-mono); font-size: var(--text-sm); line-height: 1.6; }
+.input::placeholder, .textarea::placeholder { color: var(--color-muted); }
+@media (hover: hover) { .input:hover, .textarea:hover, .select:hover { background: var(--color-paper); } }
+.input:focus-visible, .textarea:focus-visible, .select:focus-visible { outline-color: var(--color-focus); border-color: var(--color-ink-2); }
+.input[aria-invalid="true"], .textarea[aria-invalid="true"] { border-color: var(--color-error); }
+.input:disabled, .textarea:disabled, .select:disabled { opacity: 0.55; cursor: not-allowed; background: var(--color-paper-2); }
+
+/* ---------- choices (selectable chips) ---------- */
+.choices { display: flex; flex-wrap: wrap; gap: var(--space-xs); min-width: 0; margin: 0; padding: 0; border: 0; }
+.choices > legend { float: left; width: 100%; margin-bottom: var(--space-xs); padding: 0; font-size: var(--text-sm); font-weight: 500; }
+.choices--stack { flex-direction: column; align-items: stretch; }
+.chip {
+  position: relative; display: inline-flex; align-items: center; gap: var(--space-xs);
+  min-height: var(--control-h); padding: var(--space-xs) var(--space-md);
+  border: var(--rule-hair) solid var(--color-rule-2); border-radius: var(--radius-input);
+  background: var(--color-key-face); color: var(--color-ink); box-shadow: var(--shadow-key);
+  font-size: var(--text-sm); line-height: 1.45; text-align: left; cursor: pointer;
+  transition: transform var(--dur-micro) var(--ease-out), box-shadow var(--dur-micro) var(--ease-out), background-color var(--dur-micro) var(--ease-out), border-color var(--dur-micro) var(--ease-out);
+}
+.chip input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.chip__check { width: 14px; height: 14px; opacity: 0; color: var(--color-accent-text); }
+@media (hover: hover) { .chip:hover { background: var(--color-key-hover); border-color: var(--color-muted); } }
+.chip:active { transform: translateY(2px); box-shadow: var(--shadow-key-press); }
+.chip:has(input:checked), .chip[aria-pressed="true"] { transform: translateY(2px); box-shadow: var(--shadow-key-press); background: var(--color-accent-wash); border-color: var(--color-accent); color: var(--color-accent-text); }
+.chip:has(input:checked) .chip__check, .chip[aria-pressed="true"] .chip__check { opacity: 1; }
+.chip:focus-visible, .chip:has(input:focus-visible) { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.chip:disabled, .chip:has(input:disabled) { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+
+/* ---------- segmented toggle ---------- */
+.seg { display: inline-flex; gap: var(--space-3xs); padding: var(--space-3xs); border-radius: var(--radius-input); background: var(--color-paper-3); }
+.seg button {
+  min-height: var(--control-h-sm); padding: 0 var(--space-sm); border: 0; border-radius: var(--radius-mark);
+  background: transparent; color: var(--color-ink-2); font-size: var(--text-sm); font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer;
+  transition: background-color var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out);
+}
+@media (hover: hover) { .seg button:hover { color: var(--color-ink); } }
+.seg button:active { background: var(--color-rule); }
+.seg button[aria-pressed="true"] { background: var(--color-surface); color: var(--color-ink); box-shadow: var(--shadow-card); }
+.seg button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 0; }
+.seg button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ---------- tabs ---------- */
+.tabs { display: flex; gap: var(--space-2xs); border-bottom: var(--rule-hair) solid var(--color-rule); overflow-x: auto; scrollbar-width: none; }
+.tab {
+  position: relative; min-height: var(--control-h); padding: 0 var(--space-md); border: 0; background: transparent;
+  color: var(--color-muted); font-size: var(--text-sm); font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer;
+  transition: color var(--dur-micro) var(--ease-out);
+}
+.tab::after { content: ""; position: absolute; inset: auto var(--space-sm) 0; height: 2px; background: var(--color-accent); transform: scaleX(0); transition: transform var(--dur-short) var(--ease-out); }
+@media (hover: hover) { .tab:hover { color: var(--color-ink); } }
+.tab:active { color: var(--color-ink-2); }
+.tab[aria-selected="true"] { color: var(--color-ink); }
+.tab[aria-selected="true"]::after { transform: scaleX(1); }
+.tab:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; border-radius: var(--radius-input); }
+.tab:disabled { opacity: 0.55; cursor: not-allowed; }
+.tab-panel { padding-top: var(--space-lg); }
+
+/* ---------- panel (the one container) ---------- */
+.panel { min-width: 0; color: var(--color-ink); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); background: var(--color-surface); box-shadow: var(--shadow-card); }
+@supports (corner-shape: bevel) { .panel { border-radius: var(--cut-l) var(--radius-mark); corner-shape: bevel round; } }
+.panel__head { display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
+.panel__title { font-size: var(--text-md); font-weight: 600; letter-spacing: 0; }
+.panel__actions { margin-left: auto; display: flex; align-items: center; gap: var(--space-2xs); }
+.panel__body { padding: var(--space-md); }
+.panel__foot { display: flex; align-items: center; gap: var(--space-xs); padding: var(--space-sm) var(--space-md); border-top: var(--rule-hair) solid var(--color-rule); }
+
+/* ---------- status label ---------- */
+.status { display: inline-flex; align-items: center; gap: var(--space-2xs); font-size: var(--text-sm); font-weight: 500; line-height: 1.2; white-space: nowrap; color: var(--color-muted); }
+.status svg { width: 14px; height: 14px; }
+.status--active { color: var(--color-accent-text); }
+.status--frozen { color: var(--color-frozen); }
+.status--cancelled { color: var(--color-muted); }
+
+/* ---------- notices, empty, loading ---------- */
+.notice { display: flex; align-items: flex-start; gap: var(--space-xs); padding: var(--space-sm) var(--space-md); border-radius: var(--radius-inner); background: var(--color-paper-3); color: var(--color-ink); font-size: var(--text-sm); }
+.notice svg { width: 16px; height: 16px; margin-top: var(--space-3xs); }
+.notice--error { background: var(--color-error-wash); }
+.notice--error svg { color: var(--color-error); }
+.empty { display: grid; justify-items: start; gap: var(--space-sm); padding: var(--space-xl) var(--space-lg); border: var(--rule-hair) dashed var(--color-rule-2); border-radius: var(--radius-card); color: var(--color-ink-2); }
+.skeleton { display: block; min-height: 1lh; border-radius: var(--radius-mark); background: var(--color-paper-3); animation: sp-pulse 1.4s var(--ease-in-out) infinite alternate; }
+@keyframes sp-pulse { from { opacity: 1; } to { opacity: 0.45; } }
+.meta { color: var(--color-muted); font-size: var(--text-sm); }
+
+/* ---------- chat session ---------- */
+.chat { display: grid; gap: var(--space-md); margin: 0; padding: 0; list-style: none; }
+.msg { display: grid; gap: var(--space-2xs); min-width: 0; }
+.msg__who { display: inline-flex; align-items: center; gap: var(--space-2xs); color: var(--color-muted); font-size: var(--text-xs); font-weight: 500; }
+.msg__who svg { width: 14px; height: 14px; color: var(--color-accent-text); }
+.msg__body { min-width: 0; font-size: var(--text-sm); line-height: 1.65; }
+.msg__body > * + * { margin-top: var(--space-xs); }
+.msg__body a { color: var(--color-accent-text); }
+.msg__body .url { font-family: var(--font-mono); font-size: var(--text-xs); word-break: break-all; }
+.msg--agent .msg__body { color: var(--color-ink); }
+.msg--user { justify-items: end; }
+.msg--user .msg__body { max-width: 85%; padding: var(--space-xs) var(--space-sm); border-radius: var(--radius-inner) var(--radius-inner) var(--space-3xs) var(--radius-inner); background: var(--color-accent-wash); color: var(--color-ink); }
+.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--space-xs); }
+.composer .textarea { min-height: var(--control-h); height: auto; field-sizing: content; max-height: 10lh; }
+
+/* ---------- gallery (link and image previews) ---------- */
+.gallery { display: grid; gap: var(--space-xs); min-width: 0; container-type: inline-size; }
+.gallery__bar { display: flex; align-items: center; gap: var(--space-xs); }
+.gallery__bar .seg, .gallery__bar .btn-row { margin-left: auto; }
+.gallery__track { display: grid; gap: var(--space-sm); margin: 0; padding: 0; list-style: none; }
+.gallery__track[data-view="grid"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@container (max-width: 420px) { .gallery__track[data-view="grid"] { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.gallery__track[data-view="slide"] { grid-auto-flow: column; grid-auto-columns: minmax(0, 78%); overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scrollbar-width: thin; padding-bottom: var(--space-2xs); }
+.gallery__track[data-view="slide"] > li { scroll-snap-align: start; }
+.preview { min-width: 0; }
+.preview__link { display: grid; gap: var(--space-2xs); border-radius: var(--radius-inner); color: inherit; text-decoration: none; }
+.preview__media { display: grid; place-items: center; aspect-ratio: 16 / 10; overflow: hidden; border-radius: var(--radius-inner); background: var(--color-paper-3); color: var(--color-muted); outline: var(--rule-hair) solid var(--color-rule); outline-offset: calc(var(--rule-hair) * -1); }
+.preview__media img { width: 100%; height: 100%; object-fit: cover; }
+.preview__media svg { width: 24px; height: 24px; }
+.preview__title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: var(--text-sm); font-weight: 500; line-height: 1.4; }
+.preview__site { overflow: hidden; color: var(--color-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+@media (hover: hover) { .preview__link:hover .preview__title { text-decoration: underline; text-decoration-color: var(--color-accent); } }
+.preview__link:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+/* ---------- markdown document ---------- */
+.md-doc { max-width: 72ch; color: var(--color-ink); font-size: var(--text-md); line-height: 1.75; }
+.md-doc > * + * { margin-top: var(--space-md); }
+.md-doc h1 { font-size: var(--text-3xl); line-height: 1.25; }
+.md-doc h2 { margin-top: var(--space-xl); padding-bottom: var(--space-xs); border-bottom: var(--rule-hair) solid var(--color-rule); font-size: var(--text-xl); }
+.md-doc h3 { margin-top: var(--space-lg); font-size: var(--text-lg); }
+.md-doc h4 { margin-top: var(--space-lg); font-size: var(--text-md); }
+.md-doc h2 + *, .md-doc h3 + *, .md-doc h4 + * { margin-top: var(--space-sm); }
+.md-doc ul, .md-doc ol { padding-left: var(--space-lg); }
+.md-doc li + li { margin-top: var(--space-2xs); }
+.md-doc li::marker { color: var(--color-muted); }
+.md-doc a { color: var(--color-accent-text); }
+.md-doc strong { font-weight: 600; }
+.md-doc blockquote { margin-inline: 0; padding: var(--space-2xs) var(--space-md); border-left: 2px solid var(--color-rule-2); color: var(--color-ink-2); }
+.md-doc code { padding: var(--space-3xs) var(--space-2xs); border-radius: var(--radius-mark); background: var(--color-paper-3); font-size: 0.875em; }
+.md-doc pre { overflow-x: auto; padding: var(--space-md); border-radius: var(--radius-inner); background: var(--color-graphite); color: var(--color-graphite-ink); font-size: var(--text-sm); line-height: 1.6; }
+.md-doc pre code { padding: 0; background: none; font-size: inherit; color: inherit; }
+.md-doc img { border-radius: var(--radius-inner); background: var(--color-paper-3); outline: var(--rule-hair) solid var(--color-rule); outline-offset: calc(var(--rule-hair) * -1); }
+.md-doc figure { margin-inline: 0; }
+.md-doc figcaption { margin-top: var(--space-xs); color: var(--color-muted); font-size: var(--text-sm); }
+.md-doc table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); line-height: 1.55; }
+.md-doc th, .md-doc td { padding: var(--space-xs) var(--space-sm); border-bottom: var(--rule-hair) solid var(--color-rule); text-align: left; vertical-align: top; }
+.md-doc th { border-bottom-color: var(--color-rule-2); font-weight: 600; white-space: nowrap; }
+.md-doc hr { margin-block: var(--space-xl); border: 0; border-top: var(--rule-hair) solid var(--color-rule); }
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  .btn:active, .chip:active, .chip:has(input:checked), .chip[aria-pressed="true"] { transform: none; }
+  .skeleton { animation: none; }
+}
+total 288
+drwxr-xr-x@  16 jyl  staff     512 11월 16 21:28 .
+drwxr-xr-x    8 jyl  staff     256 11월 16 20:55 ..
+drwxr-xr-x@   6 jyl  staff     192 11월 16 21:20 .data
+-rw-r--r--@   1 jyl  staff      53 11월 16 20:32 .gitignore
+-rw-r--r--@   1 jyl  staff    6361 11월 16 20:33 CONTRACT.md
+-rw-r--r--@   1 jyl  staff   17758 11월 16 20:43 DESIGN.md
+-rw-r--r--@   1 jyl  staff     482 11월 16 20:31 dev.mjs
+drwxr-xr-x@  12 jyl  staff     384 11월 16 21:28 frontend
+drwxr-xr-x@ 144 jyl  staff    4608 11월 16 20:32 node_modules
+-rw-r--r--@   1 jyl  staff  105761 11월 16 20:32 package-lock.json
+-rw-r--r--@   1 jyl  staff     198 11월 16 20:31 package.json
+drwxr-xr-x@  12 jyl  staff     384 11월 16 21:25 plan-doc
+drwxr-xr-x@   3 jyl  staff      96 11월 16 20:42 shared
+drwxr-xr-x@  12 jyl  staff     384 11월 16 21:25 step1
+-rw-r--r--@   1 jyl  staff       0 11월 16 21:18 super-planer.db
+drwxr-xr-x@  12 jyl  staff     384 11월 16 21:25 workflow-view
+{
+  "name": "super-planer-pocs",
+  "private": true,
+  "workspaces": ["step1", "workflow-view", "plan-doc"],
+  "scripts": {
+    "dev": "node dev.mjs",
+    "build": "npm run build --workspaces"
+  }
+}
+./super-planer.db
+./CONTRACT.md
+./.gitignore
+./package-lock.json
+./package.json
+./DESIGN.md
+./dev.mjs
+./frontend/next-env.d.ts
+./frontend/.gitignore
+./frontend/package.json
+./frontend/tsconfig.json
+./frontend/AGENTS.md
+./frontend/eslint.config.mjs
+./frontend/next.config.ts
+./workflow-view/tsconfig.tsbuildinfo
+./workflow-view/next-env.d.ts
+./workflow-view/package.json
+./workflow-view/tsconfig.json
+./workflow-view/AGENTS.md
+./workflow-view/next.config.ts
+./shared/tokens.css
+./step1/tsconfig.tsbuildinfo
+./step1/next-env.d.ts
+./step1/package.json
+./step1/tsconfig.json
+./step1/AGENTS.md
+./step1/next.config.ts
+./.data/super-planer.db
+./.data/super-planer.db-shm
+./.data/super-planer.db-wal
+./plan-doc/tsconfig.tsbuildinfo
+./plan-doc/next-env.d.ts
+./plan-doc/package.json
+./plan-doc/tsconfig.json
+./plan-doc/AGENTS.md
+./plan-doc/next.config.ts
+./step1/app/StartForm.tsx
+./step1/app/layout.tsx
+./step1/app/icons.tsx
+./step1/app/page.tsx
+./step1/app/globals.css
+./step1/app/not-found.tsx
+./step1/public/super-planer-logo.svg
+./step1/public/super-planer-icon.svg
+./step1/lib/schema.ts
+./step1/lib/interview.test.mjs
+./step1/lib/llm.ts
+./step1/lib/session.ts
+./step1/lib/interview.ts
+./step1/lib/db.ts
+./.data/uploads/79c369b5-89ba-4fb6-8358-b62c7b6d6f71
+./.data/uploads/40bfbf55-37cf-4892-902e-58ede13ad51b
+./plan-doc/app/Markdown.tsx
+./plan-doc/app/PlanDoc.tsx
+./plan-doc/app/layout.tsx
+./plan-doc/app/icons.tsx
+./plan-doc/app/page.tsx
+./plan-doc/app/globals.css
+./plan-doc/public/super-planer-logo.svg
+./plan-doc/public/super-planer-icon.svg
+./plan-doc/lib/schema.ts
+./plan-doc/lib/assemble.test.mjs
+./plan-doc/lib/images.ts
+./plan-doc/lib/assemble.ts
+./plan-doc/lib/imports.ts
+./plan-doc/lib/llm.ts
+./plan-doc/lib/db.ts
+./step1/app/s/[id]/Interview.tsx
+./step1/app/s/[id]/page.tsx
+./step1/app/api/sessions/route.ts
+./step1/app/api/sessions/[id]/route.ts
+./frontend/app/favicon.ico
+./frontend/app/layout.tsx
+./frontend/app/page.tsx
+./frontend/app/globals.css
+./workflow-view/app/Gallery.tsx
+./workflow-view/app/flow.ts
+./workflow-view/app/CardNode.tsx
+./workflow-view/app/layout.tsx
+./workflow-view/app/icons.tsx
+./workflow-view/app/Canvas.tsx
+./workflow-view/app/Chat.tsx
+./workflow-view/app/page.tsx
+./workflow-view/app/globals.css
+./workflow-view/public/super-planer-logo.svg
+./workflow-view/public/super-planer-icon.svg
+./workflow-view/lib/schema.ts
+./workflow-view/lib/urls.ts
+./workflow-view/lib/http.ts
+./workflow-view/lib/agent.ts
+./workflow-view/lib/seed.ts
+./workflow-view/lib/llm.ts
+./workflow-view/lib/preview.test.ts
+./workflow-view/lib/db.ts
+./workflow-view/lib/md.ts
+./workflow-view/lib/urls.test.ts
+./workflow-view/lib/store.ts
+./workflow-view/lib/preview.ts
+./plan-doc/public/samples/mood.svg
+./plan-doc/public/samples/ui.svg

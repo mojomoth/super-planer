@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-labelledby="t">
+  <title id="t">분위기: 새벽의 수프 가게</title>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2B3A5C"/>
+      <stop offset="0.55" stop-color="#7E7BA0"/>
+      <stop offset="1" stop-color="#F2B88B"/>
+    </linearGradient>
+    <radialGradient id="win" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFD27A" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#FFD27A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="640" height="400" fill="url(#sky)"/>
+  <circle cx="520" cy="92" r="3" fill="#FFFFFF" opacity="0.8"/>
+  <circle cx="120" cy="60" r="2" fill="#FFFFFF" opacity="0.7"/>
+  <circle cx="380" cy="40" r="2" fill="#FFFFFF" opacity="0.6"/>
+  <!-- hills -->
+  <path d="M0 300C100 250 200 270 300 252C400 234 500 262 640 240V400H0Z" fill="#4F6B5E"/>
+  <path d="M0 330C120 304 240 322 360 310C470 300 560 316 640 308V400H0Z" fill="#3D5649"/>
+  <!-- cave mouth under the hill -->
+  <path d="M470 340C470 300 540 300 540 340Z" fill="#1A2436"/>
+  <circle cx="490" cy="334" r="4" fill="#45C9A8"/><circle cx="512" cy="328" r="3" fill="#45C9A8"/>
+  <!-- shop -->
+  <g>
+    <circle cx="250" cy="250" r="120" fill="url(#win)"/>
+    <rect x="160" y="200" width="180" height="120" rx="10" fill="#C99366"/>
+    <path d="M146 210L250 140L354 210Z" fill="#8E4F3A"/>
+    <rect x="300" y="140" width="22" height="46" fill="#7A4434"/>
+    <path d="M311 132C302 118 318 108 309 92M318 124C312 110 326 100 320 84" fill="none" stroke="#E9E2EE" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
+    <rect x="182" y="228" width="58" height="46" rx="6" fill="#FFD27A"/>
+    <path d="M211 228V274M182 251H240" stroke="#C99366" stroke-width="4"/>
+    <rect x="266" y="246" width="50" height="74" rx="6" fill="#6B3E2E"/>
+    <circle cx="306" cy="286" r="3" fill="#FFD27A"/>
+    <!-- sign: soup bowl -->
+    <rect x="200" y="176" width="100" height="26" rx="6" fill="#F6EFE3"/>
+    <path d="M236 186H264C264 196 256 200 250 200C244 200 236 196 236 186Z" fill="#D9604A"/>
+  </g>
+  <!-- path -->
+  <path d="M290 320C300 340 340 352 380 360C420 368 460 360 480 344" fill="none" stroke="#C9B48F" stroke-width="10" stroke-linecap="round" opacity="0.7"/>
+  <g font-family="Apple SD Gothic Neo, Malgun Gothic, sans-serif" fill="#F6EFE3">
+    <text x="28" y="40" font-size="20" font-weight="700">새벽 5시, 탐험에서 돌아오는 길</text>
+    <text x="28" y="62" font-size="13">차가운 하늘과 따뜻한 창문의 대비</text>
+    <text x="440" y="384" font-size="12">버섯굴 입구</text>
+  </g>
+</svg>

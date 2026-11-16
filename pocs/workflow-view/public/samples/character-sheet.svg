@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500" role="img" aria-labelledby="t">
+  <title id="t">캐릭터 시트 초안: 고양이 정원사 모모</title>
+  <rect width="800" height="500" fill="#EEF1F6"/>
+  <g transform="translate(250 270)">
+    <ellipse cx="0" cy="120" rx="120" ry="18" fill="#D5DAE3"/>
+    <path d="M-90 110 C -100 20, -60 -40, 0 -40 C 60 -40, 100 20, 90 110 Z" fill="#F2A65A"/>
+    <circle cx="0" cy="-80" r="80" fill="#F2A65A"/>
+    <path d="M-70 -130 L -60 -200 L -20 -150 Z M70 -130 L 60 -200 L 20 -150 Z" fill="#F2A65A"/>
+    <circle cx="-28" cy="-88" r="9" fill="#2E2A25"/><circle cx="28" cy="-88" r="9" fill="#2E2A25"/>
+    <path d="M-12 -60 Q 0 -50 12 -60" stroke="#2E2A25" stroke-width="4" fill="none" stroke-linecap="round"/>
+    <path d="M-95 -150 Q 0 -230 95 -150 L 120 -140 L -120 -140 Z" fill="#6B8F5E"/>
+    <rect x="-40" y="20" width="80" height="60" rx="12" fill="#8DB580"/>
+  </g>
+  <g font-family="sans-serif" fill="#2E2A25">
+    <text x="470" y="140" font-size="40" font-weight="700">모모</text>
+    <text x="470" y="190" font-size="22">겁 많은 고양이 정원사</text>
+    <text x="470" y="250" font-size="20">능력: 냄새로 씨앗 찾기</text>
+    <text x="470" y="285" font-size="20">약점: 어두운 곳을 무서워함</text>
+    <text x="470" y="320" font-size="20">도구: 등불, 작은 모종삽</text>
+  </g>
+</svg>

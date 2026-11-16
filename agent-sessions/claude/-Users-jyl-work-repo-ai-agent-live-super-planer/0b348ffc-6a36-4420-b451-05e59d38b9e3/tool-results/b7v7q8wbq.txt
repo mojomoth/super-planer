@@ -1,0 +1,648 @@
+     644 app/PlanDoc.tsx
+      94 app/globals.css
+      18 app/icons.tsx
+     756 total
+     1	'use client';
+     2	import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+     3	import { sourceLabel } from '@/lib/assemble';
+     4	import { MAX_UPLOAD } from '@/lib/images';
+     5	import type { DocRow, InputRow } from '@/lib/schema';
+     6	import { Icon } from './icons';
+     7	import Markdown from './Markdown';
+     8	
+     9	type DocMeta = Omit<DocRow, 'markdown'>;
+    10	type Step1Row = { session_id: string; title: string; one_liner: string; created_at: string };
+    11	type Props = {
+    12	  initialInputs: InputRow[];
+    13	  initialDocs: DocMeta[];
+    14	  initialDoc: DocRow | null;
+    15	  step1: Step1Row[];
+    16	  workflowId: string | null;
+    17	};
+    18	type Imported = { ids: string[]; message?: string };
+    19	type Tab = 'preview' | 'markdown' | 'split';
+    20	type Save = 'saved' | 'dirty' | 'saving' | 'error';
+    21	
+    22	const TABS: [Tab, string][] = [['preview', '미리보기'], ['markdown', '마크다운'], ['split', '나란히']];
+    23	const SAVE_TEXT: Record<Save, string> = { saved: '저장됨', dirty: '고친 내용 저장 대기 중', saving: '저장 중', error: '저장하지 못했어요. 잠시 뒤 다시 저장돼요.' };
+    24	
+    25	async function api<T>(url: string, init?: RequestInit): Promise<T> {
+    26	  const res = await fetch(url, init);
+    27	  const data = (await res.json().catch(() => ({}))) as T & { error?: string; message?: string };
+    28	  if (!res.ok) throw new Error(data.error ?? data.message ?? `요청이 실패했어요 (${res.status})`);
+    29	  return data;
+    30	}
+    31	const json = (method: string, body: unknown): RequestInit => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    32	
+    33	/** One-line text preview of a Markdown body. */
+    34	const preview = (body: string | null) => (body ?? '').replace(/[#*_`>|-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+    35	const when = (iso: string) => new Date(iso).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    36	
+    37	export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1: initialStep1, workflowId }: Props) {
+    38	  const [inputs, setInputs] = useState(initialInputs);
+    39	  const [selected, setSelected] = useState<Set<string>>(() => new Set(initialInputs.map((i) => i.id)));
+    40	  const [imported, setImported] = useState<Imported | null>(null);
+    41	  const [docs, setDocs] = useState(initialDocs);
+    42	  const [doc, setDoc] = useState<DocRow | null>(initialDoc);
+    43	  const [md, setMd] = useState(initialDoc?.markdown ?? '');
+    44	  const [save, setSave] = useState<Save>('saved');
+    45	  const [tab, setTab] = useState<Tab>('preview');
+    46	  const [busy, setBusy] = useState(false);
+    47	  const [error, setError] = useState<string | null>(null);
+    48	  const [note, setNote] = useState<string | null>(null);
+    49	  const [copied, setCopied] = useState(false);
+    50	  const [editing, setEditing] = useState<InputRow | 'new' | null>(null);
+    51	  const [captioning, setCaptioning] = useState<string | null>(null);
+    52	  const [addingImage, setAddingImage] = useState(false);
+    53	  const [step1Open, setStep1Open] = useState(false);
+    54	  const [step1, setStep1] = useState(initialStep1);
+    55	  const tabRefs = useRef<Record<Tab, HTMLButtonElement | null>>({ preview: null, markdown: null, split: null });
+    56	
+    57	  const decisions = inputs.filter((i) => i.kind === 'decision');
+    58	  const images = inputs.filter((i) => i.kind === 'image');
+    59	  const pickedDecisions = decisions.filter((i) => selected.has(i.id));
+    60	  const pickedImages = images.filter((i) => selected.has(i.id));
+    61	
+    62	  const importedCount = imported?.ids.length
+    63	    ? `워크플로우에서 결정 ${inputs.filter((i) => imported.ids.includes(i.id) && i.kind === 'decision').length}개, 이미지 ${inputs.filter((i) => imported.ids.includes(i.id) && i.kind === 'image').length}개를 가져와 골라 두었어요.`
+    64	    : null;
+    65	
+    66	  // /?workflow=<id> hand-off: import once (idempotent, keeps edited copies), preselect, then drop the query so a refresh does not repeat it.
+    67	  useEffect(() => {
+    68	    if (!workflowId) return;
+    69	    let live = true;
+    70	    (async () => {
+    71	      try {
+    72	        const res = await fetch('/api/import', json('POST', { workflow: workflowId }));
+    73	        const data = (await res.json().catch(() => ({}))) as Partial<Imported> & { inputs?: InputRow[]; error?: string };
+    74	        if (!live) return;
+    75	        if (data.inputs) setInputs(data.inputs);
+    76	        if (data.ids?.length) setSelected(new Set(data.ids));
+    77	        setImported({ ids: data.ids ?? [], message: data.ids?.length ? undefined : (data.message ?? data.error ?? '워크플로우를 가져오지 못했어요.') });
+    78	        window.history.replaceState(null, '', window.location.pathname);
+    79	      } catch {
+    80	        if (live) setImported({ ids: [], message: '워크플로우를 가져오지 못했어요. 새로고침해 다시 시도해 주세요.' });
+    81	      }
+    82	    })();
+    83	    return () => {
+    84	      live = false;
+    85	    };
+    86	  }, [workflowId]);
+    87	
+    88	  // Debounced autosave of the Markdown editor.
+    89	  useEffect(() => {
+    90	    if (save !== 'dirty' || !doc) return;
+    91	    const t = setTimeout(() => void persist(doc.id, md), 800);
+    92	    return () => clearTimeout(t);
+    93	  }, [md, save, doc]);
+    94	
+    95	  async function persist(id: string, markdown: string) {
+    96	    setSave('saving');
+    97	    try {
+    98	      const r = await api<{ doc: DocRow }>(`/api/docs/${id}`, json('PATCH', { markdown }));
+    99	      setDocs((ds) => ds.map((d) => (d.id === id ? { ...d, title: r.doc.title } : d)));
+   100	      setDoc((d) => (d && d.id === id ? { ...d, title: r.doc.title } : d));
+   101	      setSave((s) => (s === 'saving' ? 'saved' : s));
+   102	    } catch {
+   103	      setSave('error');
+   104	      setTimeout(() => setSave((s) => (s === 'error' ? 'dirty' : s)), 3000);
+   105	    }
+   106	  }
+   107	
+   108	  function toggle(id: string) {
+   109	    setSelected((s) => {
+   110	      const n = new Set(s);
+   111	      if (n.has(id)) n.delete(id);
+   112	      else n.add(id);
+   113	      return n;
+   114	    });
+   115	  }
+   116	
+   117	  function setAll(list: InputRow[], on: boolean) {
+   118	    setSelected((s) => {
+   119	      const n = new Set(s);
+   120	      for (const i of list) if (on) n.add(i.id);
+   121	      else n.delete(i.id);
+   122	      return n;
+   123	    });
+   124	  }
+   125	
+   126	  async function generate() {
+   127	    setBusy(true);
+   128	    setError(null);
+   129	    setNote(null);
+   130	    try {
+   131	      if (doc && save !== 'saved') await persist(doc.id, md);
+   132	      const r = await api<{ doc: DocRow; error?: string }>('/api/generate', json('POST', { decisionIds: pickedDecisions.map((i) => i.id), imageIds: pickedImages.map((i) => i.id) }));
+   133	      setDoc(r.doc);
+   134	      setMd(r.doc.markdown);
+   135	      setSave('saved');
+   136	      setDocs((ds) => [{ id: r.doc.id, title: r.doc.title, provider: r.doc.provider, created_at: r.doc.created_at }, ...ds]);
+   137	      setTab('preview');
+   138	      if (r.error) setNote(`모델 응답을 쓰지 못해 입력만으로 조립한 문서를 만들었어요. (${r.error})`);
+   139	    } catch (e) {
+   140	      setError((e as Error).message);
+   141	    } finally {
+   142	      setBusy(false);
+   143	    }
+   144	  }
+   145	
+   146	  async function openDoc(id: string) {
+   147	    if (id === doc?.id) return;
+   148	    setError(null);
+   149	    try {
+   150	      if (doc && save !== 'saved') await persist(doc.id, md);
+   151	      const r = await api<{ doc: DocRow }>(`/api/docs/${id}`);
+   152	      setDoc(r.doc);
+   153	      setMd(r.doc.markdown);
+   154	      setSave('saved');
+   155	    } catch (e) {
+   156	      setError((e as Error).message);
+   157	    }
+   158	  }
+   159	
+   160	  async function removeInput(i: InputRow) {
+   161	    if (!window.confirm(`'${i.title}'을(를) 지울까요?`)) return;
+   162	    try {
+   163	      await api(`/api/inputs/${encodeURIComponent(i.id)}`, { method: 'DELETE' });
+   164	      setInputs((xs) => xs.filter((x) => x.id !== i.id));
+   165	      if (editing !== 'new' && editing?.id === i.id) setEditing(null);
+   166	    } catch (e) {
+   167	      setError((e as Error).message);
+   168	    }
+   169	  }
+   170	
+   171	  function added(input: InputRow) {
+   172	    setInputs((xs) => [...xs.filter((x) => x.id !== input.id), input]);
+   173	    setSelected((s) => new Set(s).add(input.id));
+   174	  }
+   175	
+   176	  async function loadSeed() {
+   177	    try {
+   178	      const r = await api<{ inputs: InputRow[] }>('/api/seed', { method: 'POST' });
+   179	      setInputs(r.inputs);
+   180	      setSelected(new Set(r.inputs.map((i) => i.id)));
+   181	    } catch (e) {
+   182	      setError((e as Error).message);
+   183	    }
+   184	  }
+   185	
+   186	  async function openStep1() {
+   187	    setStep1Open((o) => !o);
+   188	    if (step1Open) return;
+   189	    try {
+   190	      setStep1((await api<{ step1: Step1Row[] }>('/api/import')).step1);
+   191	    } catch {
+   192	      // keep the list we had from the server render
+   193	    }
+   194	  }
+   195	
+   196	  async function importStep1(id: string) {
+   197	    setError(null);
+   198	    try {
+   199	      const r = await api<{ ids: string[]; inputs: InputRow[] }>('/api/import', json('POST', { step1: id }));
+   200	      setInputs(r.inputs);
+   201	      setSelected((s) => new Set([...s, ...r.ids]));
+   202	      setStep1Open(false);
+   203	    } catch (e) {
+   204	      setError((e as Error).message);
+   205	    }
+   206	  }
+   207	
+   208	  function onTabKey(e: KeyboardEvent<HTMLButtonElement>) {
+   209	    const i = TABS.findIndex(([t]) => t === tab);
+   210	    const next = e.key === 'ArrowRight' ? (i + 1) % TABS.length : e.key === 'ArrowLeft' ? (i + TABS.length - 1) % TABS.length : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : -1;
+   211	    if (next < 0) return;
+   212	    e.preventDefault();
+   213	    setTab(TABS[next][0]);
+   214	    tabRefs.current[TABS[next][0]]?.focus();
+   215	  }
+   216	
+   217	  // Relative image paths (/samples, /api/images) only resolve inside this app, so exports get absolute URLs.
+   218	  const exportMd = () => md.replace(/\]\(\/(?!\/)/g, `](${window.location.origin}/`);
+   219	
+   220	  function download() {
+   221	    const blob = new Blob([exportMd()], { type: 'text/markdown;charset=utf-8' });
+   222	    const a = document.createElement('a');
+   223	    a.href = URL.createObjectURL(blob);
+   224	    a.download = `${(doc?.title ?? '기획서').replace(/[\\/:*?"<>|]+/g, ' ').trim() || '기획서'} 기획서.md`;
+   225	    a.click();
+   226	    // Revoking right after click() can cancel the download in some browsers.
+   227	    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+   228	  }
+   229	
+   230	  async function copy() {
+   231	    try {
+   232	      await navigator.clipboard.writeText(exportMd());
+   233	      setCopied(true);
+   234	      setTimeout(() => setCopied(false), 2000);
+   235	    } catch {
+   236	      setError('클립보드에 복사하지 못했어요. 마크다운 탭에서 직접 선택해 복사해 주세요.');
+   237	    }
+   238	  }
+   239	
+   240	  const editor = (
+   241	    <div className="field doc-editor">
+   242	      <label className="field__label" htmlFor="doc-md">마크다운</label>
+   243	      <textarea
+   244	        id="doc-md"
+   245	        className="textarea textarea--code doc-editor__area"
+   246	        value={md}
+   247	        spellCheck={false}
+   248	        onChange={(e) => {
+   249	          setMd(e.target.value);
+   250	          setSave('dirty');
+   251	        }}
+   252	      />
+   253	    </div>
+   254	  );
+   255	
+   256	  return (
+   257	    <>
+   258	      <div className="page-head">
+   259	        <div className="page-head__text">
+   260	          <h1>기획서 만들기</h1>
+   261	          <p className="page-head__desc">결정 문서와 이미지 예시를 골라 한 편의 Markdown 기획서로 묶어요.</p>
+   262	        </div>
+   263	      </div>
+   264	
+   265	      {imported?.message ? (
+   266	        <div className="notice plan-notice" role="status"><Icon name="alert" /><p>{imported.message}</p></div>
+   267	      ) : importedCount ? (
+   268	        <div className="notice plan-notice" role="status"><Icon name="check" /><p>{importedCount}</p></div>
+   269	      ) : null}
+   270	      {error ? (
+   271	        <div className="notice notice--error plan-notice" role="alert"><Icon name="alert" /><p>{error}</p></div>
+   272	      ) : null}
+   273	
+   274	      <div className="plan-layout">
+   275	        <div className="plan-inputs">
+   276	          <section className="panel" aria-labelledby="dec-h">
+   277	            <header className="panel__head">
+   278	              <div className="panel__heading">
+   279	                <h2 className="panel__title" id="dec-h">결정 문서</h2>
+   280	                <p className="meta num">{pickedDecisions.length} / {decisions.length}개 선택</p>
+   281	              </div>
+   282	              <div className="panel__actions">
+   283	                <button type="button" className="btn btn--ghost btn--sm" onClick={() => setAll(decisions, pickedDecisions.length !== decisions.length)} disabled={!decisions.length}>
+   284	                  {pickedDecisions.length === decisions.length && decisions.length ? '모두 해제' : '모두 선택'}
+   285	                </button>
+   286	                <button type="button" className="btn btn--sm" onClick={() => setEditing('new')} aria-expanded={editing === 'new'}>
+   287	                  <Icon name="plus" />추가
+   288	                </button>
+   289	              </div>
+   290	            </header>
+   291	            <div className="panel__body">
+   292	              {editing ? (
+   293	                <DecisionForm
+   294	                  key={editing === 'new' ? 'new' : editing.id}
+   295	                  input={editing === 'new' ? null : editing}
+   296	                  onDone={(row) => {
+   297	                    if (row) {
+   298	                      if (editing === 'new') added(row);
+   299	                      else setInputs((xs) => xs.map((x) => (x.id === row.id ? row : x)));
+   300	                    }
+   301	                    setEditing(null);
+   302	                  }}
+   303	                />
+   304	              ) : null}
+   305	              {decisions.length ? (
+   306	                <ul className="pick-list">
+   307	                  {decisions.map((d) => (
+   308	                    <li key={d.id} className="pick">
+   309	                      <input type="checkbox" id={`pick-${d.id}`} checked={selected.has(d.id)} onChange={() => toggle(d.id)} />
+   310	                      <label htmlFor={`pick-${d.id}`} className="pick__text">
+   311	                        <span className="pick__title">{d.title}</span>
+   312	                        <span className="pick__preview">{preview(d.body)}</span>
+   313	                      </label>
+   314	                      <div className="pick__actions">
+   315	                        <span className="pick__source">{sourceLabel(d.source)}</span>
+   316	                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => setEditing(d)} aria-label={`${d.title} 수정`}>수정</button>
+   317	                        <button type="button" className="btn btn--ghost btn--danger btn--sm" onClick={() => void removeInput(d)} aria-label={`${d.title} 삭제`}>삭제</button>
+   318	                      </div>
+   319	                    </li>
+   320	                  ))}
+   321	                </ul>
+   322	              ) : (
+   323	                <div className="empty">
+   324	                  <p>결정 문서가 없어요. 직접 추가하거나 예시를 불러오세요.</p>
+   325	                  <button type="button" className="btn" onClick={() => void loadSeed()}>예시 불러오기</button>
+   326	                </div>
+   327	              )}
+   328	            </div>
+   329	            <footer className="panel__foot plan-step1">
+   330	              <button type="button" className="btn btn--ghost btn--sm" onClick={() => void openStep1()} aria-expanded={step1Open} aria-controls="step1-list">
+   331	                Step1 결과 가져오기
+   332	              </button>
+   333	              {step1Open ? (
+   334	                <div id="step1-list" className="plan-step1__list">
+   335	                  {step1.length ? (
+   336	                    <ul className="pick-list">
+   337	                      {step1.map((s) => (
+   338	                        <li key={s.session_id} className="pick pick--plain">
+   339	                          <span className="pick__text">
+   340	                            <span className="pick__title">{s.title}</span>
+   341	                            <span className="pick__preview">{s.one_liner}</span>
+   342	                          </span>
+   343	                          <button type="button" className="btn btn--sm" onClick={() => void importStep1(s.session_id)}>가져오기</button>
+   344	                        </li>
+   345	                      ))}
+   346	                    </ul>
+   347	                  ) : (
+   348	                    <p className="meta">
+   349	                      Step1에서 끝낸 결과가 아직 없어요. <a href="http://localhost:3101/">질문하기에서 시작하기</a>
+   350	                    </p>
+   351	                  )}
+   352	                </div>
+   353	              ) : null}
+   354	            </footer>
+   355	          </section>
+   356	
+   357	          <section className="panel" aria-labelledby="img-h">
+   358	            <header className="panel__head">
+   359	              <div className="panel__heading">
+   360	                <h2 className="panel__title" id="img-h">이미지 예시</h2>
+   361	                <p className="meta num">{pickedImages.length} / {images.length}개 선택</p>
+   362	              </div>
+   363	              <div className="panel__actions">
+   364	                <button type="button" className="btn btn--ghost btn--sm" onClick={() => setAll(images, pickedImages.length !== images.length)} disabled={!images.length}>
+   365	                  {pickedImages.length === images.length && images.length ? '모두 해제' : '모두 선택'}
+   366	                </button>
+   367	                <button type="button" className="btn btn--sm" onClick={() => setAddingImage((v) => !v)} aria-expanded={addingImage}>
+   368	                  <Icon name="plus" />추가
+   369	                </button>
+   370	              </div>
+   371	            </header>
+   372	            <div className="panel__body">
+   373	              {addingImage ? (
+   374	                <ImageForm
+   375	                  onDone={(row) => {
+   376	                    if (row) added(row);
+   377	                    setAddingImage(false);
+   378	                  }}
+   379	                />
+   380	              ) : null}
+   381	              {images.length ? (
+   382	                <section className="gallery" aria-label="이미지 예시 목록">
+   383	                  <ul className="gallery__track" data-view="grid">
+   384	                    {images.map((img) => (
+   385	                      <li key={img.id} className="preview tile">
+   386	                        <input type="checkbox" className="tile__check" id={`pick-${img.id}`} checked={selected.has(img.id)} onChange={() => toggle(img.id)} />
+   387	                        <label htmlFor={`pick-${img.id}`} className="tile__label">
+   388	                          <span className="preview__media">
+   389	                            <img src={img.url ?? ''} alt="" loading="lazy" width="640" height="400" />
+   390	                          </span>
+   391	                          {captioning === img.id ? null : <span className="preview__title">{img.title}</span>}
+   392	                        </label>
+   393	                        {captioning === img.id ? (
+   394	                          <CaptionForm
+   395	                            input={img}
+   396	                            onDone={(row) => {
+   397	                              if (row) setInputs((xs) => xs.map((x) => (x.id === row.id ? row : x)));
+   398	                              setCaptioning(null);
+   399	                            }}
+   400	                          />
+   401	                        ) : null}
+   402	                        <span className="tile__foot">
+   403	                          <span className="preview__site">{sourceLabel(img.source)}</span>
+   404	                          <span className="tile__btns">
+   405	                            <button type="button" className="btn btn--ghost btn--sm" onClick={() => setCaptioning(img.id)} aria-label={`${img.title} 캡션 수정`} aria-expanded={captioning === img.id}>캡션</button>
+   406	                            <button type="button" className="btn btn--ghost btn--danger btn--sm tile__del" onClick={() => void removeInput(img)} aria-label={`${img.title} 삭제`}>삭제</button>
+   407	                          </span>
+   408	                        </span>
+   409	                      </li>
+   410	                    ))}
+   411	                  </ul>
+   412	                </section>
+   413	              ) : (
+   414	                <div className="empty"><p>이미지가 없어요. 파일을 올리거나 https 주소로 추가하세요.</p></div>
+   415	              )}
+   416	            </div>
+   417	          </section>
+   418	
+   419	          <div className="plan-go">
+   420	            <button type="button" className="btn btn--primary" onClick={() => void generate()} disabled={busy || !pickedDecisions.length} aria-busy={busy}>
+   421	              <Icon name="doc" />기획서 만들기
+   422	            </button>
+   423	            <p className="meta">{pickedDecisions.length ? `결정 ${pickedDecisions.length}개와 이미지 ${pickedImages.length}개로 만들어요.` : '결정 문서를 하나 이상 골라 주세요.'}</p>
+   424	          </div>
+   425	        </div>
+   426	
+   427	        <section className="panel doc-panel" aria-labelledby="doc-h" aria-busy={busy}>
+   428	          <header className="panel__head doc-panel__head">
+   429	            <div className="doc-panel__title">
+   430	              <h2 className="panel__title" id="doc-h">{doc ? `${doc.title} 기획서` : '기획서'}</h2>
+   431	              {doc ? (
+   432	                <p className="meta" suppressHydrationWarning>
+   433	                  LLM: {doc.provider ?? 'mock'}, {when(doc.created_at)} 생성
+   434	                </p>
+   435	              ) : null}
+   436	            </div>
+   437	            <div className="panel__actions">
+   438	              <button type="button" className="btn btn--ghost btn--sm" onClick={download} disabled={!doc}><Icon name="download" />.md 다운로드</button>
+   439	              <button type="button" className="btn btn--ghost btn--sm" onClick={() => void copy()} disabled={!doc}>
+   440	                <Icon name={copied ? 'check' : 'copy'} />{copied ? '복사했어요' : '마크다운 복사'}
+   441	              </button>
+   442	            </div>
+   443	          </header>
+   444	          <div className="panel__body">
+   445	            {note ? <div className="notice plan-notice" role="status"><Icon name="alert" /><p>{note}</p></div> : null}
+   446	            {busy ? (
+   447	              <div className="doc-skeleton" aria-hidden="true">
+   448	                <span className="skeleton" style={{ width: '55%' }} />
+   449	                <span className="skeleton" style={{ width: '90%' }} />
+   450	                <span className="skeleton" style={{ width: '80%' }} />
+   451	                <span className="skeleton" style={{ width: '35%' }} />
+   452	                <span className="skeleton" style={{ width: '85%' }} />
+   453	              </div>
+   454	            ) : !doc ? (
+   455	              <div className="empty">
+   456	                <p>아직 만든 기획서가 없어요. 왼쪽에서 결정과 이미지를 고른 뒤 기획서 만들기를 눌러 주세요.</p>
+   457	              </div>
+   458	            ) : (
+   459	              <>
+   460	                <div className="doc-tabbar">
+   461	                  <div className="tabs" role="tablist" aria-label="기획서 보기">
+   462	                    {TABS.map(([t, label]) => (
+   463	                      <button
+   464	                        key={t}
+   465	                        ref={(el) => { tabRefs.current[t] = el; }}
+   466	                        type="button"
+   467	                        role="tab"
+   468	                        className="tab"
+   469	                        id={`t-${t}`}
+   470	                        aria-selected={tab === t}
+   471	                        aria-controls={tab === t ? `p-${t}` : undefined}
+   472	                        tabIndex={tab === t ? 0 : -1}
+   473	                        onClick={() => setTab(t)}
+   474	                        onKeyDown={onTabKey}
+   475	                      >
+   476	                        {label}
+   477	                      </button>
+   478	                    ))}
+   479	                  </div>
+   480	                  <p className="meta doc-save" role="status">{SAVE_TEXT[save]}</p>
+   481	                </div>
+   482	                <div className="tab-panel" role="tabpanel" id={`p-${tab}`} aria-labelledby={`t-${tab}`}>
+   483	                  {tab === 'preview' ? <Markdown markdown={md} /> : null}
+   484	                  {tab === 'markdown' ? editor : null}
+   485	                  {tab === 'split' ? (
+   486	                    <div className="doc-split">
+   487	                      {editor}
+   488	                      <div className="doc-split__preview" aria-label="미리보기"><Markdown markdown={md} /></div>
+   489	                    </div>
+   490	                  ) : null}
+   491	                </div>
+   492	              </>
+   493	            )}
+   494	          </div>
+   495	          {docs.length ? (
+   496	            <footer className="panel__foot doc-versions">
+   497	              <h3 className="doc-versions__title">저장된 기획서</h3>
+   498	              <ol className="doc-versions__list">
+   499	                {docs.map((d) => (
+   500	                  <li key={d.id}>
+   501	                    <button type="button" className="version" onClick={() => void openDoc(d.id)} aria-current={d.id === doc?.id ? 'true' : undefined}>
+   502	                      <span className="version__title">{d.title}</span>
+   503	                      <span className="version__meta" suppressHydrationWarning>{when(d.created_at)}</span>
+   504	                    </button>
+   505	                  </li>
+   506	                ))}
+   507	              </ol>
+   508	            </footer>
+   509	          ) : null}
+   510	        </section>
+   511	      </div>
+   512	    </>
+   513	  );
+   514	}
+   515	
+   516	function DecisionForm({ input, onDone }: { input: InputRow | null; onDone: (row: InputRow | null) => void }) {
+   517	  const [title, setTitle] = useState(input?.title ?? '');
+   518	  const [body, setBody] = useState(input?.body ?? '');
+   519	  const [err, setErr] = useState<string | null>(null);
+   520	  const [busy, setBusy] = useState(false);
+   521	  const id = input?.id ?? 'new';
+   522	
+   523	  async function submit(e: FormEvent) {
+   524	    e.preventDefault();
+   525	    if (!title.trim()) return setErr('제목을 적어 주세요.');
+   526	    setBusy(true);
+   527	    setErr(null);
+   528	    try {
+   529	      const r = input
+   530	        ? await api<{ input: InputRow }>(`/api/inputs/${encodeURIComponent(input.id)}`, json('PATCH', { title, body }))
+   531	        : await api<{ input: InputRow }>('/api/inputs', json('POST', { kind: 'decision', title, body }));
+   532	      onDone(r.input);
+   533	    } catch (e2) {
+   534	      setErr((e2 as Error).message);
+   535	      setBusy(false);
+   536	    }
+   537	  }
+   538	
+   539	  return (
+   540	    <form className="add-form" onSubmit={submit} aria-label={input ? '결정 문서 수정' : '결정 문서 추가'}>
+   541	      <div className="field">
+   542	        <label className="field__label" htmlFor={`dt-${id}`}>제목</label>
+   543	        <input className="input" id={`dt-${id}`} value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} placeholder="예: 전투와 실패 규칙" aria-invalid={!!err && !title.trim()} aria-describedby={`de-${id}`} />
+   544	      </div>
+   545	      <div className="field">
+   546	        <label className="field__label" htmlFor={`db-${id}`}>본문 (Markdown)</label>
+   547	        <textarea className="textarea textarea--code" id={`db-${id}`} rows={7} value={body} maxLength={20000} onChange={(e) => setBody(e.target.value)} placeholder={'결정: 쓰러져도 레시피는 남긴다\n- 열린 질문: 보스가 필요할까?'} />
+   548	        <p className="field__help">`키: 값` 줄(가제, 장르, 플랫폼, 타깃)과 `열린 질문:` 줄은 기획서에 그대로 옮겨져요.</p>
+   549	      </div>
+   550	      <p className="field__error" id={`de-${id}`} role="alert">{err}</p>
+   551	      <div className="btn-row">
+   552	        <button type="submit" className="btn" disabled={busy} aria-busy={busy}>{input ? '고친 내용 저장' : '결정 추가'}</button>
+   553	        <button type="button" className="btn btn--ghost" onClick={() => onDone(null)}>닫기</button>
+   554	      </div>
+   555	    </form>
+   556	  );
+   557	}
+   558	
+   559	function CaptionForm({ input, onDone }: { input: InputRow; onDone: (row: InputRow | null) => void }) {
+   560	  const [title, setTitle] = useState(input.title);
+   561	  const [err, setErr] = useState<string | null>(null);
+   562	  const [busy, setBusy] = useState(false);
+   563	
+   564	  async function submit(e: FormEvent) {
+   565	    e.preventDefault();
+   566	    if (!title.trim()) return setErr('캡션을 적어 주세요.');
+   567	    setBusy(true);
+   568	    setErr(null);
+   569	    try {
+   570	      onDone((await api<{ input: InputRow }>(`/api/inputs/${encodeURIComponent(input.id)}`, json('PATCH', { title }))).input);
+   571	    } catch (e2) {
+   572	      setErr((e2 as Error).message);
+   573	      setBusy(false);
+   574	    }
+   575	  }
+   576	
+   577	  return (
+   578	    <form className="caption-form" onSubmit={submit} aria-label="캡션 수정">
+   579	      <label className="field__label" htmlFor={`cap-${input.id}`}>캡션</label>
+   580	      <input className="input" id={`cap-${input.id}`} value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} autoFocus aria-invalid={!!err} aria-describedby={`cap-err-${input.id}`} />
+   581	      <p className="field__error" id={`cap-err-${input.id}`} role="alert">{err}</p>
+   582	      <div className="btn-row">
+   583	        <button type="submit" className="btn btn--sm" disabled={busy} aria-busy={busy}>저장</button>
+   584	        <button type="button" className="btn btn--ghost btn--sm" onClick={() => onDone(null)}>취소</button>
+   585	      </div>
+   586	    </form>
+   587	  );
+   588	}
+   589	
+   590	function ImageForm({ onDone }: { onDone: (row: InputRow | null) => void }) {
+   591	  const [title, setTitle] = useState('');
+   592	  const [url, setUrl] = useState('');
+   593	  const [err, setErr] = useState<string | null>(null);
+   594	  const [busy, setBusy] = useState(false);
+   595	  const fileRef = useRef<HTMLInputElement>(null);
+   596	
+   597	  async function submit(e: FormEvent) {
+   598	    e.preventDefault();
+   599	    const file = fileRef.current?.files?.[0];
+   600	    if (!file && !url.trim()) return setErr('파일을 고르거나 이미지 주소를 넣어 주세요.');
+   601	    if (file && file.size > MAX_UPLOAD) return setErr('이미지는 5MB 이하만 올릴 수 있어요.');
+   602	    // file.type can be empty or odd for a valid image, so the server's magic-byte check decides; SVG is refused early.
+   603	    if (file && (file.type === 'image/svg+xml' || /\.svgz?$/i.test(file.name))) return setErr('PNG, JPG, WEBP, GIF 이미지만 올릴 수 있어요.');
+   604	    if (!file && !/^https:\/\//i.test(url.trim())) return setErr('https:// 로 시작하는 주소를 넣어 주세요.');
+   605	    setBusy(true);
+   606	    setErr(null);
+   607	    try {
+   608	      let r: { input: InputRow };
+   609	      if (file) {
+   610	        const form = new FormData();
+   611	        form.set('file', file);
+   612	        form.set('title', title);
+   613	        r = await api('/api/inputs', { method: 'POST', body: form });
+   614	      } else r = await api('/api/inputs', json('POST', { kind: 'image', title: title || '참고 이미지', url: url.trim() }));
+   615	      onDone(r.input);
+   616	    } catch (e2) {
+   617	      setErr((e2 as Error).message);
+   618	      setBusy(false);
+   619	    }
+   620	  }
+   621	
+   622	  return (
+   623	    <form className="add-form" onSubmit={submit} aria-label="이미지 추가">
+   624	      <div className="field">
+   625	        <label className="field__label" htmlFor="img-title">캡션</label>
+   626	        <input className="input" id="img-title" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} placeholder="예: 보스방 조명 레퍼런스" />
+   627	      </div>
+   628	      <div className="field">
+   629	        <label className="field__label" htmlFor="img-file">이미지 파일</label>
+   630	        <input className="input input--file" id="img-file" type="file" ref={fileRef} accept="image/png,image/jpeg,image/webp,image/gif" aria-describedby="img-file-help" />
+   631	        <p className="field__help" id="img-file-help">png, jpg, webp, gif 중 하나, 5MB 이하</p>
+   632	      </div>
+   633	      <div className="field">
+   634	        <label className="field__label" htmlFor="img-url">또는 이미지 주소</label>
+   635	        <input className="input" id="img-url" type="url" inputMode="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://picsum.photos/seed/cave/640/400" aria-invalid={!!err} aria-describedby="img-err" />
+   636	      </div>
+   637	      <p className="field__error" id="img-err" role="alert">{err}</p>
+   638	      <div className="btn-row">
+   639	        <button type="submit" className="btn" disabled={busy} aria-busy={busy}>이미지 추가</button>
+   640	        <button type="button" className="btn btn--ghost" onClick={() => onDone(null)}>닫기</button>
+   641	      </div>
+   642	    </form>
+   643	  );
+   644	}

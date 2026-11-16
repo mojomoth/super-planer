@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500" role="img" aria-labelledby="t">
+  <title id="t">아트 팔레트 시안: 지상 노을빛과 지하 푸른 그림자</title>
+  <rect width="800" height="500" fill="#FAF7F2"/>
+  <g font-family="sans-serif" font-size="20" fill="#3A3A3A">
+    <text x="60" y="70" font-size="26" font-weight="700">지상</text>
+    <rect x="60" y="90" width="120" height="120" rx="14" fill="#F2A65A"/><rect x="200" y="90" width="120" height="120" rx="14" fill="#F6D7A7"/>
+    <rect x="340" y="90" width="120" height="120" rx="14" fill="#E8C3C9"/><rect x="480" y="90" width="120" height="120" rx="14" fill="#8DB580"/>
+    <text x="60" y="290" font-size="26" font-weight="700">지하</text>
+    <rect x="60" y="310" width="120" height="120" rx="14" fill="#1F2A33"/><rect x="200" y="310" width="120" height="120" rx="14" fill="#36506B"/>
+    <rect x="340" y="310" width="120" height="120" rx="14" fill="#8FB9A8"/><rect x="480" y="310" width="120" height="120" rx="14" fill="#FFF3B0"/>
+    <text x="630" y="160">따뜻하게</text><text x="630" y="380">차분하게</text>
+  </g>
+</svg>

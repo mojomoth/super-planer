@@ -1,0 +1,612 @@
+=== app/Canvas.tsx
+     1	'use client';
+     2	import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+     3	import { useRouter } from 'next/navigation';
+     4	import {
+     5	  ReactFlow, ReactFlowProvider, Background, BackgroundVariant, Controls, MiniMap,
+     6	  useNodesState, useEdgesState, useReactFlow, addEdge,
+     7	  type Edge as FlowEdge, type NodeChange, type Connection, type OnBeforeDelete,
+     8	} from '@xyflow/react';
+     9	import type { Card, Edge, Message, Workflow } from '@/lib/store';
+    10	import { ActionsContext, api, type Actions, type CardData, type CardNodeT } from './flow';
+    11	import CardNode from './CardNode';
+    12	import { Icon } from './icons';
+    13	
+    14	type Props = {
+    15	  workflow: Workflow;
+    16	  cards: Card[];
+    17	  edges: Edge[];
+    18	  messages: Message[];
+    19	  workflows: { id: string; title: string }[];
+    20	  notice: string | null;
+    21	};
+    22	
+    23	const nodeTypes = { card: CardNode };
+    24	const PLAN_DOC = 'http://localhost:3103/';
+    25	
+    26	const ARIA = {
+    27	  'node.a11yDescription.default': '엔터나 스페이스로 카드를 선택하고, 방향키로 옮겨요.',
+    28	  'node.a11yDescription.keyboardDisabled': '엔터나 스페이스로 카드를 선택해요.',
+    29	  'node.a11yDescription.ariaLiveMessage': ({ x, y }: { direction: string; x: number; y: number }) => `카드를 옮겼어요. 위치 ${x}, ${y}`,
+    30	  'edge.a11yDescription.default': '엔터나 스페이스로 연결을 선택하고 Delete 키로 지워요.',
+    31	  'controls.ariaLabel': '캔버스 조작',
+    32	  'controls.zoomIn.ariaLabel': '확대',
+    33	  'controls.zoomOut.ariaLabel': '축소',
+    34	  'controls.fitView.ariaLabel': '전체 보기',
+    35	  'controls.interactive.ariaLabel': '편집 잠금',
+    36	  'minimap.ariaLabel': '미니맵',
+    37	  'handle.ariaLabel': '연결 지점',
+    38	};
+    39	
+    40	const toNode = (card: Card, messages: Message[]): CardNodeT => ({
+    41	  id: card.id, type: 'card', position: { x: card.x, y: card.y }, data: { card, messages }, zIndex: card.expanded ? 10 : 0,
+    42	});
+    43	
+    44	export default function Canvas(props: Props) {
+    45	  return (
+    46	    <ReactFlowProvider>
+    47	      <Flow {...props} />
+    48	    </ReactFlowProvider>
+    49	  );
+    50	}
+    51	
+    52	function Flow({ workflow, cards, edges: initialEdges, messages, workflows, notice }: Props) {
+    53	  const router = useRouter();
+    54	  const rf = useReactFlow<CardNodeT>();
+    55	  const [nodes, setNodes, onNodesChangeBase] = useNodesState<CardNodeT>(
+    56	    cards.map((c) => toNode(c, messages.filter((m) => m.card_id === c.id))),
+    57	  );
+    58	  const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>(initialEdges.map(({ id, source, target }) => ({ id, source, target })));
+    59	  const [error, setError] = useState<string | null>(null);
+    60	  const [adding, setAdding] = useState(false);
+    61	  const canvasRef = useRef<HTMLDivElement>(null);
+    62	  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+    63	  const fail = useCallback((e: unknown) => setError((e as Error).message), []);
+    64	
+    65	  const patchCard = useCallback(
+    66	    (id: string, fn: (d: CardData) => CardData) =>
+    67	      setNodes((ns) => ns.map((n) => {
+    68	        if (n.id !== id) return n;
+    69	        const data = fn(n.data);
+    70	        return { ...n, data, zIndex: data.card.expanded ? 10 : 0 };
+    71	      })),
+    72	    [setNodes],
+    73	  );
+    74	
+    75	  const actions = useMemo<Actions>(() => ({
+    76	    toggle(id) {
+    77	      const cur = rf.getNode(id);
+    78	      if (!cur) return;
+    79	      const expanded = !cur.data.card.expanded;
+    80	      patchCard(id, (d) => ({ ...d, card: { ...d.card, expanded } }));
+    81	      api(`/api/cards/${id}`, 'PATCH', { expanded }).catch(fail);
+    82	    },
+    83	    async setStatus(id, action) {
+    84	      try {
+    85	        const { card } = await api<{ card: Card }>(`/api/cards/${id}/status`, 'POST', { action });
+    86	        patchCard(id, (d) => ({ ...d, card: { ...card, expanded: d.card.expanded, x: d.card.x, y: d.card.y } }));
+    87	      } catch (e) {
+    88	        fail(e);
+    89	      }
+    90	    },
+    91	    async send(id, content) {
+    92	      const r = await api<{ messages: Message[]; error?: string }>(`/api/cards/${id}/messages`, 'POST', { content });
+    93	      patchCard(id, (d) => ({ ...d, messages: [...d.messages, ...r.messages] }));
+    94	      return { error: r.error };
+    95	    },
+    96	  }), [rf, patchCard, fail]);
+    97	
+    98	  // Persist the final position of a drag or keyboard nudge (dragging === false), coalescing quick nudges.
+    99	  const onNodesChange = useCallback((changes: NodeChange<CardNodeT>[]) => {
+   100	    onNodesChangeBase(changes.filter((c) => c.type !== 'remove'));
+   101	    for (const c of changes) {
+   102	      if (c.type !== 'position' || c.dragging !== false || !c.position) continue;
+   103	      const { id } = c;
+   104	      const x = Math.round(c.position.x);
+   105	      const y = Math.round(c.position.y);
+   106	      clearTimeout(timers.current.get(id));
+   107	      timers.current.set(id, setTimeout(() => {
+   108	        patchCard(id, (d) => ({ ...d, card: { ...d.card, x, y } }));
+   109	        api(`/api/cards/${id}`, 'PATCH', { x, y }).catch(fail);
+   110	      }, 250));
+   111	    }
+   112	  }, [onNodesChangeBase, patchCard, fail]);
+   113	
+   114	  const onConnect = useCallback(async (c: Connection) => {
+   115	    try {
+   116	      const { edge } = await api<{ edge: Edge }>(`/api/workflows/${workflow.id}/edges`, 'POST', { source: c.source, target: c.target });
+   117	      setEdges((es) => addEdge({ id: edge.id, source: edge.source, target: edge.target }, es));
+   118	    } catch (e) {
+   119	      fail(e);
+   120	    }
+   121	  }, [workflow.id, setEdges, fail]);
+   122	
+   123	  // Cards are never deleted from the canvas; only connectors are.
+   124	  const onBeforeDelete: OnBeforeDelete<CardNodeT, FlowEdge> = useCallback(async ({ edges: es }) => ({ nodes: [], edges: es }), []);
+   125	  const onEdgesDelete = useCallback((deleted: FlowEdge[]) => {
+   126	    for (const e of deleted) {
+   127	      api(`/api/edges/${e.id}`, 'DELETE').catch((err) => {
+   128	        fail(err);
+   129	        setEdges((es) => (es.some((x) => x.id === e.id) ? es : [...es, { id: e.id, source: e.source, target: e.target }]));
+   130	      });
+   131	    }
+   132	  }, [fail, setEdges]);
+   133	
+   134	  const status = new Map(nodes.map((n) => [n.id, n.data.card.status]));
+   135	  const shownEdges = edges.map((e) => ({ ...e, className: `edge--${status.get(e.target) ?? 'active'}` }));
+   136	  const frozen = nodes.filter((n) => n.data.card.status === 'frozen').length;
+   137	  const selectedEdges = edges.filter((e) => e.selected);
+   138	
+   139	  async function addCard(title: string, description: string) {
+   140	    const rect = canvasRef.current?.getBoundingClientRect();
+   141	    const center = rect ? rf.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
+   142	    const offset = nodes.length % 5 * 24; // stack repeated adds visibly instead of exactly on top of each other
+   143	    const { card } = await api<{ card: Card }>(`/api/workflows/${workflow.id}/cards`, 'POST', {
+   144	      title, description, x: Math.round(center.x - 220 + offset), y: Math.round(center.y - 160 + offset),
+   145	    });
+   146	    setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), { ...toNode(card, []), selected: true }]);
+   147	  }
+   148	
+   149	  return (
+   150	    <ActionsContext.Provider value={actions}>
+   151	      <div className="wf">
+   152	        <div className="wf-toolbar">
+   153	          <div className="wf-toolbar__title">
+   154	            <h1>{workflow.title}</h1>
+   155	            <label className="visually-hidden" htmlFor="wf-select">워크플로우 선택</label>
+   156	            <select
+   157	              id="wf-select" className="select wf-select" value={workflow.id}
+   158	              onChange={(e) => router.push(`/?workflow=${encodeURIComponent(e.target.value)}`)}
+   159	            >
+   160	              {workflows.map((w) => <option key={w.id} value={w.id}>{w.title}</option>)}
+   161	            </select>
+   162	          </div>
+   163	          <p className="meta num">카드 {nodes.length}개, 동결 {frozen}개</p>
+   164	          <div className="btn-row wf-toolbar__actions">
+   165	            {selectedEdges.length > 0 && (
+   166	              <button type="button" className="btn btn--ghost btn--danger btn--sm" onClick={() => rf.deleteElements({ edges: selectedEdges })}>
+   167	                연결 삭제
+   168	              </button>
+   169	            )}
+   170	            <button type="button" className="btn" id="add-card-btn" aria-expanded={adding} aria-controls="add-card" onClick={() => setAdding((v) => !v)}>
+   171	              카드 추가
+   172	            </button>
+   173	            {frozen > 0 ? (
+   174	              <a className="btn btn--primary" href={`${PLAN_DOC}?workflow=${encodeURIComponent(workflow.id)}`}>기획서 만들기</a>
+   175	            ) : (
+   176	              <button type="button" className="btn btn--primary" disabled aria-describedby="plan-hint">기획서 만들기</button>
+   177	            )}
+   178	          </div>
+   179	          {frozen === 0 && <p className="meta wf-toolbar__hint" id="plan-hint">카드를 하나 이상 동결하면 기획서를 만들 수 있어요.</p>}
+   180	        </div>
+   181	
+   182	        {(notice || error) && (
+   183	          <div className="wf-notices">
+   184	            {notice && <div className="notice" role="status"><Icon name="alert" /><p>{notice}</p></div>}
+   185	            {error && (
+   186	              <div className="notice notice--error" role="alert">
+   187	                <Icon name="alert" /><p>{error}</p>
+   188	                <button type="button" className="btn btn--ghost btn--sm wf-notice__close" onClick={() => setError(null)}>닫기</button>
+   189	              </div>
+   190	            )}
+   191	          </div>
+   192	        )}
+   193	
+   194	        <div className="wf-canvas" ref={canvasRef}>
+   195	          <ReactFlow
+   196	            nodes={nodes}
+   197	            edges={shownEdges}
+   198	            nodeTypes={nodeTypes}
+   199	            onNodesChange={onNodesChange}
+   200	            onEdgesChange={onEdgesChange}
+   201	            onConnect={onConnect}
+   202	            onBeforeDelete={onBeforeDelete}
+   203	            onEdgesDelete={onEdgesDelete}
+   204	            isValidConnection={(c) => c.source !== c.target}
+   205	            deleteKeyCode={['Backspace', 'Delete']}
+   206	            fitView
+   207	            fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
+   208	            minZoom={0.2}
+   209	            maxZoom={1.6}
+   210	            ariaLabelConfig={ARIA}
+   211	          >
+   212	            <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
+   213	            <Controls showInteractive={false} />
+   214	            <MiniMap pannable zoomable nodeClassName={(n) => `mm--${(n as CardNodeT).data.card.status}`} />
+   215	          </ReactFlow>
+   216	          {nodes.length === 0 && !adding && (
+   217	            <div className="wf-overlay">
+   218	              <div className="empty"><p>아직 카드가 없어요.</p><button type="button" className="btn" onClick={() => setAdding(true)}>카드 추가</button></div>
+   219	            </div>
+   220	          )}
+   221	          {adding && <AddCardForm onAdd={addCard} onClose={() => setAdding(false)} />}
+   222	        </div>
+   223	      </div>
+   224	    </ActionsContext.Provider>
+   225	  );
+   226	}
+   227	
+   228	function AddCardForm({ onAdd, onClose }: { onAdd: (title: string, description: string) => Promise<void>; onClose: () => void }) {
+   229	  const [busy, setBusy] = useState(false);
+   230	  const [err, setErr] = useState<string | null>(null);
+   231	  const titleRef = useRef<HTMLInputElement>(null);
+   232	
+   233	  useEffect(() => {
+   234	    titleRef.current?.focus();
+   235	    return () => document.getElementById('add-card-btn')?.focus();
+   236	  }, []);
+   237	
+   238	  async function submit(e: React.FormEvent<HTMLFormElement>) {
+   239	    e.preventDefault();
+   240	    const f = new FormData(e.currentTarget);
+   241	    const title = String(f.get('title') ?? '').trim();
+   242	    if (!title) {
+   243	      setErr('제목을 써 주세요.');
+   244	      titleRef.current?.focus();
+   245	      return;
+   246	    }
+   247	    setBusy(true);
+   248	    setErr(null);
+   249	    try {
+   250	      await onAdd(title, String(f.get('description') ?? '').trim());
+   251	      onClose();
+   252	    } catch (e2) {
+   253	      setErr((e2 as Error).message);
+   254	      setBusy(false);
+   255	    }
+   256	  }
+   257	
+   258	  return (
+   259	    <form id="add-card" className="panel wf-add" aria-labelledby="add-card-h" onSubmit={submit} onKeyDown={(e) => e.key === 'Escape' && onClose()} noValidate>
+   260	      <header className="panel__head"><h2 className="panel__title" id="add-card-h">카드 추가</h2></header>
+   261	      <div className="panel__body wf-add__body">
+   262	        <div className="field">
+   263	          <label className="field__label" htmlFor="new-title">제목</label>
+   264	          <input
+   265	            ref={titleRef} className="input" id="new-title" name="title" maxLength={80} placeholder="예: 보스 디자인"
+   266	            aria-invalid={err ? true : undefined} aria-describedby={err ? 'new-title-err' : undefined}
+   267	          />
+   268	          {err && <p className="field__error" id="new-title-err">{err}</p>}
+   269	        </div>
+   270	        <div className="field">
+   271	          <label className="field__label" htmlFor="new-desc">설명</label>
+   272	          <textarea className="textarea" id="new-desc" name="description" rows={2} maxLength={400} placeholder="예: 지하 정원 끝에서 만나는 상대 정하기" />
+   273	        </div>
+   274	      </div>
+   275	      <footer className="panel__foot">
+   276	        <button type="submit" className="btn" disabled={busy} aria-busy={busy}>추가</button>
+   277	        <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
+   278	      </footer>
+   279	    </form>
+   280	  );
+   281	}
+=== app/CardNode.tsx
+     1	'use client';
+     2	import { memo, useState } from 'react';
+     3	import { Handle, Position, type NodeProps } from '@xyflow/react';
+     4	import { useActions, type CardNodeT } from './flow';
+     5	import { Icon, type IconName } from './icons';
+     6	import Chat from './Chat';
+     7	
+     8	const LABEL = { active: '진행중', frozen: '동결', cancelled: '취소' } as const;
+     9	const ICON: Record<keyof typeof LABEL, IconName> = { active: 'clock', frozen: 'lock', cancelled: 'slash' };
+    10	
+    11	function CardNode({ id, data }: NodeProps<CardNodeT>) {
+    12	  const { card, messages } = data;
+    13	  const { toggle, setStatus } = useActions();
+    14	  const [busy, setBusy] = useState<null | 'freeze' | 'undo'>(null);
+    15	  const titleId = `card-${id}-title`;
+    16	  const bodyId = `card-${id}-body`;
+    17	
+    18	  async function run(action: 'freeze' | 'undo') {
+    19	    setBusy(action);
+    20	    await setStatus(id, action);
+    21	    setBusy(null);
+    22	  }
+    23	
+    24	  return (
+    25	    <article className="panel node" data-status={card.status} data-expanded={card.expanded} aria-labelledby={titleId}>
+    26	      <Handle type="target" position={Position.Left} />
+    27	      <header className="node__head">
+    28	        <div className="node__bar">
+    29	          <span className={`status status--${card.status}`}><Icon name={ICON[card.status]} />{LABEL[card.status]}</span>
+    30	          <div className="node__actions nodrag nopan">
+    31	            {card.status === 'active' && (
+    32	              <button type="button" className="btn btn--sm" onClick={() => run('freeze')} disabled={!!busy} aria-busy={busy === 'freeze'}>
+    33	                <Icon name="lock" />동결
+    34	              </button>
+    35	            )}
+    36	            <button type="button" className="btn btn--ghost btn--sm" onClick={() => run('undo')} disabled={!!busy} aria-busy={busy === 'undo'}>
+    37	              {card.status === 'active' ? <><Icon name="slash" />취소</> : <><Icon name="undo" />되돌리기</>}
+    38	            </button>
+    39	            <button
+    40	              type="button" className="btn btn--ghost btn--icon btn--sm" onClick={() => toggle(id)}
+    41	              aria-label={card.expanded ? '카드 접기' : '카드 펼쳐서 대화 보기'} aria-expanded={card.expanded} aria-controls={bodyId}
+    42	            >
+    43	              <Icon name={card.expanded ? 'collapse' : 'expand'} />
+    44	            </button>
+    45	          </div>
+    46	        </div>
+    47	        <h3 className="node__title" id={titleId}>{card.title}</h3>
+    48	        {card.description && <p className="node__desc">{card.description}</p>}
+    49	        {!card.expanded && card.status === 'frozen' && card.decision && <p className="node__decision">{card.decision}</p>}
+    50	        {!card.expanded && <p className="meta num">대화 {messages.length}개</p>}
+    51	      </header>
+    52	      {card.expanded && (
+    53	        <div className="node__body nodrag nopan" id={bodyId}>
+    54	          <Chat card={card} messages={messages} />
+    55	        </div>
+    56	      )}
+    57	      <Handle type="source" position={Position.Right} />
+    58	    </article>
+    59	  );
+    60	}
+    61	
+    62	export default memo(CardNode);
+=== app/Chat.tsx
+     1	'use client';
+     2	import { Fragment, useEffect, useRef, useState } from 'react';
+     3	import type { Card, Message } from '@/lib/store';
+     4	import { extractUrls } from '@/lib/urls';
+     5	import { parseBlocks, parseInline } from '@/lib/md';
+     6	import { useActions } from './flow';
+     7	import { Icon } from './icons';
+     8	import Gallery from './Gallery';
+     9	
+    10	const time = (iso: string) => new Date(iso).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+    11	
+    12	function Inline({ line }: { line: string }) {
+    13	  return parseInline(line).map((t, i) =>
+    14	    t.t === 'text' ? <Fragment key={i}>{t.v}</Fragment>
+    15	    : t.t === 'bold' ? <strong key={i}>{t.v}</strong>
+    16	    : t.t === 'link' ? <a key={i} href={t.href} target="_blank" rel="noopener noreferrer">{t.v}</a>
+    17	    : <a key={i} className="url" href={t.href} target="_blank" rel="noopener noreferrer">{t.href}</a>,
+    18	  );
+    19	}
+    20	
+    21	function Rich({ text }: { text: string }) {
+    22	  return parseBlocks(text).map((b, i) =>
+    23	    b.t === 'p' ? (
+    24	      <p key={i}>{b.lines.map((l, k) => <Fragment key={k}>{k > 0 && <br />}<Inline line={l} /></Fragment>)}</p>
+    25	    ) : b.t === 'ul' ? (
+    26	      <ul key={i}>{b.items.map((it, k) => <li key={k}><Inline line={it} /></li>)}</ul>
+    27	    ) : (
+    28	      <ol key={i}>{b.items.map((it, k) => <li key={k}><Inline line={it} /></li>)}</ol>
+    29	    ),
+    30	  );
+    31	}
+    32	
+    33	function Msg({ m, agentName }: { m: Message; agentName: string }) {
+    34	  const stamp = <time className="msg__time num" dateTime={m.created_at} suppressHydrationWarning>{time(m.created_at)}</time>;
+    35	  if (m.role === 'user') {
+    36	    return (
+    37	      <li className="msg msg--user">
+    38	        <p className="msg__who"><span className="visually-hidden">나</span>{stamp}</p>
+    39	        <div className="msg__body"><Rich text={m.content} /></div>
+    40	      </li>
+    41	    );
+    42	  }
+    43	  const urls = extractUrls(m.content);
+    44	  return (
+    45	    <li className="msg msg--agent">
+    46	      <p className="msg__who"><Icon name="agent" />{agentName}{stamp}</p>
+    47	      <div className="msg__body"><Rich text={m.content} /></div>
+    48	      {urls.length > 0 && <Gallery urls={urls} />}
+    49	    </li>
+    50	  );
+    51	}
+    52	
+    53	export default function Chat({ card, messages }: { card: Card; messages: Message[] }) {
+    54	  const { send } = useActions();
+    55	  const [text, setText] = useState('');
+    56	  const [pending, setPending] = useState(false);
+    57	  const [err, setErr] = useState<string | null>(null);
+    58	  const [note, setNote] = useState<string | null>(null);
+    59	  const listRef = useRef<HTMLOListElement>(null);
+    60	  const inputId = `msg-${card.id}`;
+    61	  const agentName = `${card.title} 에이전트`;
+    62	
+    63	  useEffect(() => {
+    64	    const el = listRef.current;
+    65	    if (el) el.scrollTop = el.scrollHeight;
+    66	  }, [messages.length, pending]);
+    67	
+    68	  async function submit() {
+    69	    const content = text.trim();
+    70	    if (!content || pending) return;
+    71	    setPending(true);
+    72	    setErr(null);
+    73	    try {
+    74	      const r = await send(card.id, content);
+    75	      setText('');
+    76	      setNote(r.error ? 'LLM 응답을 받지 못해 기본 답변을 보여 드려요.' : null);
+    77	    } catch (e) {
+    78	      setErr((e as Error).message);
+    79	    } finally {
+    80	      setPending(false);
+    81	    }
+    82	  }
+    83	
+    84	  return (
+    85	    <>
+    86	      {card.status === 'frozen' && (
+    87	        <div className="notice node__verdict">
+    88	          <Icon name="lock" />
+    89	          <div><p className="node__verdict-label">결정</p><p>{card.decision ?? '결정 내용이 없어요.'}</p></div>
+    90	        </div>
+    91	      )}
+    92	      <ol className="chat node__chat nowheel" ref={listRef} aria-label={`${card.title} 대화`} aria-busy={pending}>
+    93	        {messages.length === 0 && <li className="meta">아직 대화가 없어요. 이 카드에서 정할 것을 물어보세요.</li>}
+    94	        {messages.map((m) => <Msg key={m.id} m={m} agentName={agentName} />)}
+    95	        {pending && (
+    96	          <li className="msg msg--agent">
+    97	            <p className="msg__who"><Icon name="agent" />{agentName}<span className="visually-hidden">답변을 쓰는 중</span></p>
+    98	            <span className="skeleton node__skel" /><span className="skeleton node__skel" />
+    99	          </li>
+   100	        )}
+   101	      </ol>
+   102	      {card.status === 'active' ? (
+   103	        <form className="composer" onSubmit={(e) => { e.preventDefault(); submit(); }}>
+   104	          <label className="visually-hidden" htmlFor={inputId}>메시지</label>
+   105	          <textarea
+   106	            className="textarea" id={inputId} name="message" rows={1} maxLength={4000} value={text} disabled={pending}
+   107	            placeholder="예: 비밀방 아이디어를 더 주세요" onChange={(e) => setText(e.target.value)}
+   108	            onKeyDown={(e) => {
+   109	              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+   110	                e.preventDefault();
+   111	                submit();
+   112	              }
+   113	            }}
+   114	          />
+   115	          <button type="submit" className="btn" disabled={pending || !text.trim()} aria-busy={pending}>보내기</button>
+   116	        </form>
+   117	      ) : (
+   118	        <p className="meta">
+   119	          {card.status === 'frozen' ? '동결된 카드는 읽기만 할 수 있어요. 고치려면 되돌리기를 눌러요.' : '취소된 카드예요. 되돌리기를 누르면 다시 대화할 수 있어요.'}
+   120	        </p>
+   121	      )}
+   122	      {err && <div className="notice notice--error" role="alert"><Icon name="alert" /><p>{err}</p></div>}
+   123	      {note && <p className="meta" role="status">{note}</p>}
+   124	    </>
+   125	  );
+   126	}
+=== app/Gallery.tsx
+     1	'use client';
+     2	import { useEffect, useRef, useState } from 'react';
+     3	import { createPortal } from 'react-dom';
+     4	import { hostOf, isImageUrl } from '@/lib/urls';
+     5	import { Icon } from './icons';
+     6	
+     7	type Preview = { url: string; kind: 'image' | 'page'; title: string | null; description: string | null; image: string | null; site: string | null; error?: string };
+     8	
+     9	// One request per URL per page load, shared by every gallery that shows it.
+    10	const cache = new Map<string, Promise<Preview>>();
+    11	function loadPreview(url: string): Promise<Preview> {
+    12	  let p = cache.get(url);
+    13	  if (!p) {
+    14	    const failed: Preview = { url, kind: 'page', title: null, description: null, image: null, site: hostOf(url), error: 'failed' };
+    15	    p = fetch(`/api/preview?url=${encodeURIComponent(url)}`)
+    16	      .then((r) => (r.ok ? (r.json() as Promise<Preview>) : failed))
+    17	      .catch(() => failed);
+    18	    cache.set(url, p);
+    19	  }
+    20	  return p;
+    21	}
+    22	
+    23	type Open = (src: string, alt: string, from: HTMLElement) => void;
+    24	
+    25	function Img({ src, alt }: { src: string; alt: string }) {
+    26	  const [broken, setBroken] = useState(false);
+    27	  if (broken) return <><Icon name="alert" /><span className="visually-hidden">이미지를 불러오지 못했어요</span></>;
+    28	  return <img src={src} alt={alt} loading="lazy" decoding="async" width="640" height="400" onError={() => setBroken(true)} />;
+    29	}
+    30	
+    31	function ImageTile({ url, onOpen }: { url: string; onOpen: Open }) {
+    32	  const host = hostOf(url);
+    33	  const name = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).at(-1) ?? host);
+    34	  return (
+    35	    <li className="preview">
+    36	      <button type="button" className="preview__link preview__btn" onClick={(e) => onOpen(url, `${host} 이미지 ${name}`, e.currentTarget)}>
+    37	        <span className="preview__media"><Img src={url} alt="" /></span>
+    38	        <span className="preview__title">이미지 크게 보기</span>
+    39	        <span className="preview__site">{host}</span>
+    40	      </button>
+    41	    </li>
+    42	  );
+    43	}
+    44	
+    45	function PageTile({ url }: { url: string }) {
+    46	  const [p, setP] = useState<Preview | null>(null);
+    47	  useEffect(() => {
+    48	    let live = true;
+    49	    loadPreview(url).then((r) => live && setP(r));
+    50	    return () => {
+    51	      live = false;
+    52	    };
+    53	  }, [url]);
+    54	  const host = hostOf(url);
+    55	  return (
+    56	    <li className="preview" aria-busy={!p}>
+    57	      <a className="preview__link" href={url} target="_blank" rel="noopener noreferrer">
+    58	        <span className="preview__media">
+    59	          {!p ? <span className="skeleton preview__skel" /> : p.image ? <Img src={p.image} alt="" /> : <Icon name="link" />}
+    60	        </span>
+    61	        {p?.title ? <span className="preview__title">{p.title}</span> : <span className="preview__title preview__title--url">{url}</span>}
+    62	        <span className="preview__site">{p?.site ?? host}</span>
+    63	      </a>
+    64	    </li>
+    65	  );
+    66	}
+    67	
+    68	const reduceMotion = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    69	
+    70	export default function Gallery({ urls }: { urls: string[] }) {
+    71	  const [view, setView] = useState<'slide' | 'grid'>('slide');
+    72	  const [pos, setPos] = useState(0);
+    73	  const [box, setBox] = useState<{ src: string; alt: string } | null>(null);
+    74	  const track = useRef<HTMLUListElement>(null);
+    75	  const dialog = useRef<HTMLDialogElement>(null);
+    76	  const opener = useRef<HTMLElement | null>(null);
+    77	  const closeBtn = useRef<HTMLButtonElement>(null);
+    78	
+    79	  useEffect(() => {
+    80	    if (!box) return;
+    81	    dialog.current?.showModal();
+    82	    closeBtn.current?.focus();
+    83	  }, [box]);
+    84	
+    85	  const stride = () => {
+    86	    const el = track.current;
+    87	    const first = el?.firstElementChild as HTMLElement | null;
+    88	    return el && first ? first.offsetWidth + parseFloat(getComputedStyle(el).columnGap || '0') : 1;
+    89	  };
+    90	  const go = (dir: 1 | -1) => track.current?.scrollBy({ left: dir * stride(), behavior: reduceMotion() ? 'auto' : 'smooth' });
+    91	  const onScroll = () => {
+    92	    const el = track.current;
+    93	    if (!el) return;
+    94	    const atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 2;
+    95	    setPos(atEnd ? urls.length - 1 : Math.round(el.scrollLeft / stride()));
+    96	  };
+    97	  const open: Open = (src, alt, from) => {
+    98	    opener.current = from;
+    99	    setBox({ src, alt });
+   100	  };
+   101	
+   102	  return (
+   103	    <section className="gallery nowheel" aria-label="링크 미리보기">
+   104	      <div className="gallery__bar">
+   105	        <p className="meta num">미리보기 {urls.length}개</p>
+   106	        {urls.length > 1 && (
+   107	          <div className="seg" role="group" aria-label="보기 방식">
+   108	            <button type="button" aria-pressed={view === 'slide'} onClick={() => setView('slide')}>슬라이드</button>
+   109	            <button type="button" aria-pressed={view === 'grid'} onClick={() => { setView('grid'); setPos(0); }}>격자</button>
+   110	          </div>
+   111	        )}
+   112	      </div>
+   113	      <ul className="gallery__track" data-view={urls.length > 1 ? view : 'grid1'} ref={track} onScroll={view === 'slide' ? onScroll : undefined}>
+   114	        {urls.map((u) => (isImageUrl(u) ? <ImageTile key={u} url={u} onOpen={open} /> : <PageTile key={u} url={u} />))}
+   115	      </ul>
+   116	      {urls.length > 1 && view === 'slide' && (
+   117	        <div className="gallery__nav">
+   118	          <button type="button" className="btn btn--ghost btn--icon btn--sm" aria-label="이전 미리보기" onClick={() => go(-1)} disabled={pos === 0}><Icon name="prev" /></button>
+   119	          <p className="meta num" aria-live="polite">{pos + 1} / {urls.length}</p>
+   120	          <button type="button" className="btn btn--ghost btn--icon btn--sm" aria-label="다음 미리보기" onClick={() => go(1)} disabled={pos >= urls.length - 1}><Icon name="next" /></button>
+   121	        </div>
+   122	      )}
+   123	      {box && createPortal(
+   124	        <dialog
+   125	          ref={dialog} className="lightbox" aria-label={box.alt}
+   126	          onClose={() => { setBox(null); opener.current?.focus(); }}
+   127	          onClick={(e) => e.target === e.currentTarget && dialog.current?.close()}
+   128	        >
+   129	          <img src={box.src} alt={box.alt} />
+   130	          <div className="lightbox__bar">
+   131	            <a className="url meta" href={box.src} target="_blank" rel="noopener noreferrer">{box.src}</a>
+   132	            <form method="dialog"><button type="submit" className="btn btn--sm" ref={closeBtn}>닫기</button></form>
+   133	          </div>
+   134	        </dialog>,
+   135	        document.body,
+   136	      )}
+   137	    </section>
+   138	  );
+   139	}

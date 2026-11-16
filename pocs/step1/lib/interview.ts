@@ -1,0 +1,477 @@
+// Ouroboros-style Socratic interview for a vibe game prompt: ambiguity tracks, breadth control, stop rule, ELI5 wording.
+// Pure functions only (no db/llm imports) so lib/interview.test.mjs runs under plain `node --test`.
+
+export type TrackKey = 'fun' | 'role' | 'loop' | 'win' | 'platform' | 'mood' | 'audience' | 'unique';
+export type Ledger = Record<TrackKey, number>;
+/** `recommended`: the player pressed RECOMMEND; `choices` then holds the resolved recommendation (options[0]) so other apps read a real decision. */
+export type Answer = { choices: string[]; text: string; recommended?: boolean };
+export type Turn = { track: TrackKey; question: string; options: string[]; answer: Answer | null };
+export type Question = { track: TrackKey; question: string; hint: string; options: string[]; multi: boolean; allow_free: boolean };
+export type Concept = { title: string; one_liner: string; what: string; analogy: string; details: string[]; so_what: string };
+export type Decision = { key: TrackKey; track: string; decision: string };
+
+export const TRACKS: { key: TrackKey; label: string; weight: number }[] = [
+  { key: 'fun', label: '핵심 재미', weight: 0.18 },
+  { key: 'role', label: '플레이어 역할', weight: 0.12 },
+  { key: 'loop', label: '코어 루프', weight: 0.18 },
+  { key: 'win', label: '이기고 지는 조건', weight: 0.14 },
+  { key: 'platform', label: '플랫폼과 한 판 길이', weight: 0.08 },
+  { key: 'mood', label: '분위기와 그림체', weight: 0.09 },
+  { key: 'audience', label: '누가 할 게임인지', weight: 0.09 },
+  { key: 'unique', label: '다른 게임과 다른 점', weight: 0.12 },
+];
+export const TRACK_KEYS = TRACKS.map((t) => t.key);
+export const label = (k: TrackKey) => TRACKS.find((t) => t.key === k)!.label;
+
+export const RECOMMEND = '잘 모르겠어요, 추천해 줘';
+export const MAX_QUESTIONS = 8; // stop rule
+export const HARD_CAP = 12; // "질문 하나 더" can go past MAX_QUESTIONS up to this
+export const THRESHOLD = 0.2; // ouroboros AMBIGUITY_THRESHOLD
+export const CLEAR = 0.3; // ledger shows 명확 at or below this
+
+// Words in the prompt or an answer that already say something about a track.
+const SIGNALS: Record<TrackKey, RegExp> = {
+  fun: /퍼즐|rpg|액션|농장|키우|리듬|슈팅|시뮬|카드|로그라이크|방치|타이쿤|추리|격투|레이싱|힐링|운영|대전|생존|이야기|스토리/i,
+  role: /되어|되는|주인공|플레이어는|사장|용사|역할|조종/,
+  loop: /반복|모으|모아|수확|싸우|피하|풀고|탐험|숨어/,
+  win: /이기|지면|살아남|버티|탈출|클리어|목표|점수|랭킹|생존|승리|패배/,
+  platform: /모바일|폰|스마트폰|pc|컴퓨터|스팀|콘솔|스위치|웹|브라우저|짧게|한 판/i,
+  mood: /귀여|어두|느긋|픽셀|도트|레트로|무서|따뜻|힐링|잔잔|감성|공포|밝은|파스텔/,
+  audience: /친구|아이|혼자|같이|커플|가족|동생|초보|누구나/,
+  unique: /다른|새로운|처음|독특|특이|섞|조합|유일/,
+};
+
+const CHARACTERS = ['고양이', '강아지', '토끼', '공룡', '드래곤', '용', '로봇', '좀비', '유령', '닌자', '해적', '마법사', '기사', '외계인', '펭귄', '햄스터'];
+const PLACES = ['우주', '바다', '숲', '농장', '학교', '카페', '식당', '도시', '던전', '섬', '사막', '지하철', '편의점', '부엌', '꿈'];
+
+export const clamp = (n: number) => Math.min(1, Math.max(0, n));
+const round = (n: number) => Math.round(n * 100) / 100;
+
+/** 을/를, 이/가 … picked by the last syllable's final consonant. */
+export function josa(word: string, withFinal: string, without: string): string {
+  const c = word.replace(/[\s'"’”)\].,!?…]+$/, '').slice(-1).charCodeAt(0);
+  if (c >= 0xac00 && c <= 0xd7a3) return (c - 0xac00) % 28 ? withFinal : without;
+  return without;
+}
+
+const byPosition = (prompt: string, words: string[]) => words.filter((w) => prompt.includes(w)).sort((a, b) => prompt.indexOf(a) - prompt.indexOf(b));
+
+/** Characters and places in prompt order. `player` is a character written as the subject of something it does
+ *  ("고양이가 운영하는"), not one that merely shows up ("좀비가 나오는"), so enemies are never offered as the player. */
+export function themes(prompt: string): { chars: string[]; places: string[]; player: string | null } {
+  const chars = byPosition(prompt, CHARACTERS);
+  const player = chars.find((c) => new RegExp(`${c}(?:이|가|은|는)(?!\\s*(?:나오|나타|등장|쫓아|몰려|습격|공격|덮치))`).test(prompt)) ?? null;
+  return { chars: chars.slice(0, 1), places: byPosition(prompt, PLACES).slice(0, 2), player };
+}
+
+function subject(prompt: string): string {
+  const { chars, places } = themes(prompt);
+  const words = [...chars, ...places].slice(0, 2);
+  if (!words.length) return '이 게임';
+  if (words.length === 1) return `${words[0]}${josa(words[0], '이', '가')} 나오는 이 게임`;
+  return `${words[0]}${josa(words[0], '과', '와')} ${words[1]}${josa(words[1], '이', '가')} 나오는 이 게임`;
+}
+
+export function initialLedger(prompt: string): Ledger {
+  const l = {} as Ledger;
+  for (const k of TRACK_KEYS) l[k] = SIGNALS[k].test(prompt) ? 0.55 : 1;
+  if (themes(prompt).player) l.role = Math.min(l.role, 0.7);
+  return l;
+}
+
+export function overall(l: Ledger): number {
+  return round(TRACKS.reduce((s, t) => s + t.weight * clamp(l[t.key] ?? 1), 0));
+}
+
+/** Deterministic re-score after an answer: the answered track drops by how concrete the answer was, and every further
+ *  answer on it drops it at least 0.15 more. Words the player typed (not the preset option labels) lower other tracks a little. */
+export function applyAnswer(l: Ledger, track: TrackKey, a: Answer): Ledger {
+  const next = { ...l };
+  const picked = a.recommended ? [] : a.choices.filter((c) => c !== RECOMMEND);
+  const text = a.text.trim();
+  let score: number;
+  if (picked.length && text) score = 0.05;
+  else if (picked.length) score = 0.15;
+  else if (text.length >= 6) score = 0.1;
+  else if (a.recommended || a.choices.includes(RECOMMEND)) score = 0.3;
+  else score = 0.45; // a very short free answer stays fuzzy
+  next[track] = clamp(Math.min(l[track] - 0.15, score));
+  for (const k of TRACK_KEYS) if (k !== track && SIGNALS[k].test(text)) next[k] = Math.min(next[k], 0.5);
+  return next;
+}
+
+export const blockedTrack = (history: TrackKey[]): TrackKey | null =>
+  history.length >= 2 && history.at(-1) === history.at(-2) ? history.at(-1)! : null;
+
+/** Most ambiguous track; ties go to the track asked fewer times, then the heavier one.
+ *  After 2 consecutive turns on one track, zoom out to another (ouroboros breadth control).
+ *  The first question is the ontological one ("what IS this game?") unless the prompt already pinned the fun down. */
+export function pickTrack(l: Ledger, history: TrackKey[]): TrackKey {
+  if (!history.length && l.fun > CLEAR) return 'fun';
+  const blocked = blockedTrack(history);
+  const asks = (k: TrackKey) => history.filter((h) => h === k).length;
+  return TRACKS.filter((t) => t.key !== blocked)
+    .sort((a, b) => l[b.key] - l[a.key] || asks(a.key) - asks(b.key) || b.weight - a.weight)[0].key;
+}
+
+/** Tracks a one-page concept cannot do without: an early stop waits until these are clear too (ouroboros closure). */
+export const CORE: TrackKey[] = ['fun', 'loop', 'win'];
+
+export function shouldStop(l: Ledger, asked: number): boolean {
+  return asked >= MAX_QUESTIONS || (overall(l) <= THRESHOLD && CORE.every((k) => l[k] <= CLEAR));
+}
+
+/** Stored form of an answer: RECOMMEND becomes the first option (always the recommended one), flagged so it shows as "(추천)". */
+export function resolveAnswer(a: Answer, options: string[]): Answer {
+  return a.choices.includes(RECOMMEND) && options[0] ? { choices: [options[0]], text: a.text, recommended: true } : a;
+}
+
+/** One readable decision per answered turn ("추천" picks the first option, which is always the recommended one). */
+export function decisionOf(t: Turn): string {
+  if (!t.answer) return '';
+  const rec = (c: string) => `${c}(추천)`;
+  const parts = t.answer.recommended ? t.answer.choices.map(rec) : t.answer.choices.map((c) => (c === RECOMMEND ? rec(t.options[0] ?? '추천안') : c));
+  if (t.answer.text.trim()) parts.push(t.answer.text.trim());
+  return parts.join(', ');
+}
+
+export function decisions(turns: Turn[]): Decision[] {
+  const out: Decision[] = [];
+  for (const k of TRACK_KEYS) {
+    const d = turns.filter((t) => t.track === k && t.answer).map(decisionOf).filter(Boolean);
+    if (d.length) out.push({ key: k, track: label(k), decision: d.join(', ') });
+  }
+  return out;
+}
+
+const short = (s: string, n = 24) => (s.length > n ? `${s.slice(0, n).trim()}…` : s);
+const quoted = (s: string, withFinal: string, without: string) => `“${s}”${josa(s, withFinal, without)}`;
+/** What was said to a track's main (first) question: picked options ("추천" resolved to the first option) plus the typed text.
+ *  Follow-up answers dig deeper and live in the decisions table. */
+function picks(turns: Turn[], k: TrackKey): string[] {
+  const t = turns.find((x) => x.track === k && x.answer);
+  if (!t) return [];
+  return [...t.answer!.choices.map((c) => (c === RECOMMEND ? t.options[0] ?? '' : c)), t.answer!.text.trim()].filter(Boolean).map((s) => short(s));
+}
+const said = (turns: Turn[], k: TrackKey) => picks(turns, k)[0] ?? '';
+
+type Kind = 'grow' | 'puzzle' | 'action' | 'survive' | 'story' | 'versus' | 'other';
+// The kind with the most keyword hits wins; ties go to the earlier row.
+const KINDS: [Kind, string[]][] = [
+  ['survive', ['버티', '살아남', '생존', '좀비', '탈출', '하룻밤', '도망', '숨어']],
+  ['grow', ['키우', '농장', '가꾸', '꾸미', '운영', '카페', '가게', '타이쿤', '방치', '수집', '힐링', '느긋']],
+  ['puzzle', ['퍼즐', '머리', '푸는', '추리', '탐정', '두뇌', '맞추']],
+  ['action', ['액션', '싸우', '전투', '피하', '슈팅', '달리', '점프', '빠르', '짜릿', '리듬']],
+  ['story', ['이야기', '스토리', '소설', '선택지', '연애', '대화', '기억', '비밀', '추억']],
+  ['versus', ['대전', '겨루', 'pvp', '배틀', '경쟁', '대결', '멀티']],
+];
+export function kind(text: string): Kind {
+  const t = text.toLowerCase();
+  let best: Kind = 'other';
+  let hits = 0;
+  for (const [k, words] of KINDS) {
+    const n = words.filter((w) => t.includes(w)).length;
+    if (n > hits) [best, hits] = [k, n];
+  }
+  return best;
+}
+const FUN: Record<Kind, string> = {
+  survive: '끝까지 버티고 살아남는 재미',
+  grow: '차곡차곡 키우고 꾸미는 재미',
+  puzzle: '머리 써서 푸는 재미',
+  action: '손이 빨라야 하는 짜릿한 재미',
+  story: '이야기를 따라가는 재미',
+  versus: '친구랑 겨루는 재미',
+  other: '여기저기 돌아다니며 발견하는 재미',
+};
+/** The game's kind comes from the fun answer when there is one, else from the prompt. */
+function gameKind(prompt: string, turns: Turn[]): Kind {
+  const f = said(turns, 'fun');
+  const fromFun = (Object.keys(FUN) as Kind[]).find((k) => FUN[k] === f) ?? kind(f);
+  return fromFun !== 'other' ? fromFun : f === FUN.other ? 'other' : kind(prompt);
+}
+
+const LOOPS: Record<Kind, string[]> = {
+  grow: ['심고 기다렸다가 수확하기', '번 돈으로 시설 업그레이드하기', '손님이나 주민의 부탁 들어주기', '새 재료를 찾아 탐험하기', '모은 것으로 공간 꾸미기'],
+  puzzle: ['조각을 옮겨 맞추기', '단서를 모아 답 추리하기', '정해진 횟수 안에 풀기', '풀고 나서 다음 스테이지 열기'],
+  action: ['달리고 점프해서 피하기', '적을 쓰러뜨리고 보상 줍기', '타이밍 맞춰 버튼 누르기', '강해진 뒤 더 어려운 곳 가기'],
+  survive: ['쓸 만한 물건 찾아 모으기', '문과 창문 막아 버티기', '소리 내지 않고 숨기', '위험할 때 피하거나 맞서기', '날이 밝을 때까지 시간 벌기'],
+  story: ['대화하고 선택지 고르기', '돌아다니며 단서 찾기', '선택에 따라 달라지는 결말 보기', '인물과 친해지기'],
+  versus: ['짧은 판으로 친구와 겨루기', '이기고 랭크 올리기', '덱이나 팀 짜기', '상대 수를 읽고 받아치기'],
+  other: ['탐험하고 재료 모으기', '모은 걸로 업그레이드하기', '적이나 장애물 넘기', '퍼즐 풀고 다음으로 가기'],
+};
+
+/** Put options that match the text first (the first option doubles as the recommendation). */
+function favour(options: string[], text: string, rules: [RegExp, string][]): string[] {
+  const hit = rules.filter(([re]) => re.test(text)).map(([, o]) => o);
+  return [...new Set([...hit, ...options])].slice(0, 5);
+}
+
+type Q = Omit<Question, 'track' | 'allow_free'>;
+const ask = (question: string, hint: string, options: string[], multi = false): Q => ({ question, hint, options, multi });
+const quote = (p: string, withFinal: string, without: string) => `‘${p}’${josa(p, withFinal, without)}`;
+
+/** Deeper follow-ups per track, asked in order when the track comes up again; `p` is what was said there first. */
+const FOLLOW_UPS: Record<TrackKey, (p: string) => Q[]> = {
+  fun: (p) => [
+    ask(`${quote(p, '이', '가')} 제일 크게 터지는 순간은 언제인가요?`, '하이라이트 영상에 꼭 들어갈 3초를 떠올려 보세요.', ['목표를 딱 달성한 순간', '예상 못 한 일이 터진 순간', '남보다 잘했을 때', '모은 걸 한눈에 볼 때']),
+    ask(`${quote(p, '을', '를')} 망칠 수 있어서 이 게임에 절대 넣으면 안 되는 건 무엇인가요?`, '맛집에서 이 메뉴만은 안 판다고 정해 두는 것과 비슷해요.', ['너무 긴 기다림', '복잡한 설명', '돈을 내야 이기는 구조', '실수 한 번에 처음부터'], true),
+  ],
+  role: (p) => [
+    ask(`${quote(p, '이', '가')} 처음에 할 줄 아는 것과 나중에 할 수 있게 되는 것은 뭐가 다를까요?`, '레벨 1 캐릭터와 만렙 캐릭터를 나란히 세워 본다고 생각해 보세요.', ['새 능력이 하나씩 열려요', '함께하는 동료가 늘어나요', '장비나 도구가 좋아져요', '능력은 그대로, 내 실력이 늘어요']),
+    ask(`‘${p}’에게 약점이 딱 하나 있다면 무엇일까요?`, '약점이 있어야 그걸 메우는 재미가 생겨요. 만화 주인공도 하나씩은 있잖아요.', ['힘이 약해요', '느려요', '가진 게 별로 없어요', '혼자서는 못 해요']),
+  ],
+  loop: (p) => [
+    ask(`${quote(p, '을', '를')} 100번째 해도 지루하지 않으려면 무엇이 달라져야 할까요?`, '같은 노래도 리믹스되면 또 듣게 되는 것처럼요.', ['할 때마다 조금씩 바뀌는 상황', '점점 빨라지는 속도', '새로 열리는 아이템이나 구역', '친구 기록과 비교하기'], true),
+    ask(`한 바퀴를 다 돌고 나면 플레이어 손에는 무엇이 남나요?`, '퀘스트를 깨면 경험치와 아이템이 남는 것처럼요.', ['돈이나 재료', '새로 열린 구역', '더 강해진 캐릭터', '점수와 기록'], true),
+  ],
+  win: (p) => [
+    ask(`${quote(p, '으로', '로')} 정했다면, 잘 안 풀린 날에도 플레이어가 ‘한 판만 더’를 누르게 만드는 건 뭘까요?`, '아깝게 놓친 뽑기 기계 앞에서 동전을 하나 더 넣게 되는 그 느낌이요.', ['다음 판에 쓸 보상이 남아요', '아까운 차이로 졌다는 게 보여요', '한 판이 짧아서 부담이 없어요', '친구가 이긴 기록이 약 올려요']),
+    ask(`한 판에서 플레이어가 제일 아슬아슬해지는 때는 언제인가요?`, '롤 한타 직전처럼 심장이 쫄깃해지는 순간이요.', ['자원이 바닥날 때', '시간이 얼마 안 남았을 때', '위험이 한꺼번에 몰려올 때', '한 번만 틀려도 끝날 때']),
+  ],
+  platform: (p) => [
+    ask(`${quote(p, '을', '를')} 기준으로, 조작은 손가락 하나면 충분한가요, 아니면 버튼이 여러 개 필요한가요?`, '지하철에서 한 손으로 할 수 있는지 떠올려 보면 쉬워요.', ['탭 한 번이면 돼요', '스와이프(화면을 밀기)로 해요', '키보드나 패드 버튼 여러 개', '마우스로 클릭하고 끌어요']),
+    ask(`하다가 중간에 꺼도 괜찮으려면 게임은 언제 저장되면 좋을까요?`, '유튜브 이어보기처럼, 다시 켰을 때 어디서 시작하는지예요.', ['아무 때나 꺼도 자동 저장', '스테이지 하나 끝날 때', '게임 속 하루가 끝날 때', '저장 없이 매번 새로 시작']),
+  ],
+  mood: (p) => [
+    ask(`${quote(p, '을', '를')} 소리로 바꾸면 어떤 음악이 깔려 있을까요?`, '플레이리스트 제목을 하나 붙인다고 생각해 보세요.', ['잔잔한 로파이', '신나는 칩튠(옛날 게임기 소리)', '웅장한 오케스트라', '음악 없이 효과음만']),
+    ask(`그 분위기를 지키려면 화면에서 절대 쓰지 않을 표현은 무엇인가요?`, '인스타 피드 톤을 맞출 때 안 올리는 사진이 있는 것처럼요.', ['피나 잔인한 표현', '너무 쨍한 형광색', '글자가 가득한 화면', '갑자기 튀어나오는 놀래키기'], true),
+  ],
+  audience: (p) => [
+    ask(`${quote(p, '이', '가')} 처음 5분 안에 그만두지 않으려면 무엇이 꼭 있어야 할까요?`, '새 앱을 깔고 5분 만에 지우게 되는 이유를 거꾸로 생각해 보세요.', ['설명 없이도 아는 조작', '바로 받는 첫 보상', '한눈에 반할 캐릭터', '친구를 부르는 버튼'], true),
+    ask(`${quote(p, '이', '가')} 단톡방에 이 게임을 추천한다면 뭐라고 쓸까요?`, '링크 밑에 붙이는 한마디를 떠올려 보세요.', ['짧게 하기 딱 좋다고', '은근히 머리 쓴다고', '같이 하면 웃기다고', '그림이 예쁘다고']),
+  ],
+  unique: (p) => [
+    ask(`${quote(p, '을', '를')} 10초짜리 영상으로 보여 준다면 어떤 장면일까요?`, '틱톡에서 손가락을 멈추게 만드는 첫 장면을 떠올려 보세요.', ['처음 보는 조작을 하는 손', '예상 못 한 반전 장면', '친구와 함께 터지는 순간', '점점 커지는 내 세상']),
+    ask(`누가 이 게임을 그대로 따라 만들어도, 이 게임에만 남는 건 무엇일까요?`, '같은 메뉴를 파는 가게가 생겨도 단골이 계속 가는 이유를 떠올려 보세요.', ['캐릭터와 세계관', '손에 익은 조작감', '쌓아 온 내 기록', '같이 하는 친구들']),
+  ],
+};
+
+/** Deterministic question bank. A track asked before gets its next unused follow-up, never a repeat. */
+export function mockQuestion(prompt: string, turns: Turn[], track: TrackKey): Question {
+  const subj = subject(prompt);
+  const { chars, places, player } = themes(prompt);
+  const all = [prompt, ...turns.flatMap((t) => (t.answer ? [...t.answer.choices, t.answer.text] : []))].join(' ');
+  const out = (x: Q): Question => ({ track, ...x, allow_free: true });
+  const prev = (k: TrackKey) => said(turns, k);
+  const k = gameKind(prompt, turns);
+
+  if (turns.some((t) => t.track === track)) {
+    const asked = new Set(turns.map((t) => t.question));
+    const p = prev(track) || label(track);
+    const next = FOLLOW_UPS[track](p).find((x) => !asked.has(x.question));
+    return out(next ?? ask(`지금까지 ‘${label(track)}’에서 정한 ${quote(p, '을', '를')} 하나만 바꿀 수 있다면 어느 쪽으로 바꾸고 싶나요?`, '완성된 그림에 마지막으로 한 번만 덧칠한다고 생각해 보세요.', ['지금 그대로가 좋아요', '조금 더 쉽게', '조금 더 깊고 어렵게', '완전히 다른 쪽으로']));
+  }
+
+  switch (track) {
+    case 'fun': {
+      const first = FUN[kind(all)];
+      return out(ask(
+        `플레이어가 이 게임을 켜는 이유를 떠올려 보면, ${subj}은 결국 뭘 하는 게임인가요?`,
+        '쇼츠 썸네일처럼, 이 게임의 장면 하나만 보여 준다면 어떤 장면일지 떠올려 보세요.',
+        [...new Set([first, ...Object.values(FUN)])].slice(0, 5),
+        true,
+      ));
+    }
+    case 'role': {
+      const enemy = !player && chars[0];
+      return out(ask(
+        `${subj}에서 플레이어는 직접 뛰어다니는 주인공인가요, 아니면 위에서 내려다보는 관리자인가요?`,
+        '롤에서 챔피언 하나를 조종하는 것과, 심즈에서 동네 전체를 돌보는 것의 차이예요.',
+        [
+          ...(player ? [`${player} 본인(직접 조종)`] : enemy ? [`${enemy}${josa(enemy, '과', '와')} 맞서는 평범한 사람`] : []),
+          ...(k === 'grow' ? ['가게나 마을을 운영하는 사장님'] : []),
+          '직접 움직이는 주인공', '가게나 마을을 운영하는 사장님', '여러 캐릭터를 지휘하는 대장', '세상을 내려다보는 신 같은 존재',
+        ].filter((o, i, a) => a.indexOf(o) === i).slice(0, 5),
+      ));
+    }
+    case 'loop': {
+      const fun = prev('fun');
+      return out(ask(
+        `코어 루프(게임에서 계속 반복하는 행동)를 정해 볼게요. ${fun ? `${quote(fun, '을', '를')} 살리려면, ` : ''}플레이어가 1분 동안 가장 많이 하는 행동은 뭔가요?`,
+        '인스타에서 ‘내리고, 보고, 좋아요’가 계속 반복되는 것처럼, 게임에도 그런 한 바퀴가 있어요. 2~3개 고르면 그게 한 바퀴예요.',
+        favour(LOOPS[k], prompt, [[/모으|모아|수집|찾/, '흩어진 조각 찾아 모으기'], [/돌아다니|탐험/, '여기저기 돌아다니며 탐험하기']]),
+        true,
+      ));
+    }
+    case 'win': {
+      const loop = prev('loop');
+      return out(ask(
+        `${loop ? `${quote(loop, '을', '를')} 계속하다가, ` : `${subj}에서 `}‘이겼다’ 또는 ‘졌다’는 언제 정해지나요?`,
+        '브롤스타즈 한 판처럼 확실히 끝나는지, 마인크래프트처럼 끝없이 이어지는지의 차이예요.',
+        favour(['목표를 달성하면 승리', '체력이 다 닳으면 패배', '제한 시간 안에 끝내야 해요', '끝이 없고 계속 성장만 해요', '상대보다 먼저 해내면 승리'], all, [
+          [/버티|살아남|생존|하룻밤|좀비/, '날이 밝을 때까지 버티면 승리'], [/느긋|힐링|방치|키우|농장/, '끝이 없고 계속 성장만 해요'], [/대전|겨루|경쟁|대결/, '상대보다 먼저 해내면 승리'], [/기억|이야기|비밀/, '모든 조각을 찾으면 엔딩'],
+        ]),
+      ));
+    }
+    case 'platform':
+      return out(ask(
+        '이 게임은 주로 어디서, 한 번에 얼마나 하게 될까요?',
+        '버스에서 3분 하는 게임인지, 주말 밤에 책상에 앉아 2시간 하는 게임인지예요.',
+        favour(['폰으로 쉬는 시간에 3~5분', '폰으로 자기 전에 20분쯤', 'PC로 한 번에 1시간 넘게', '콘솔이나 TV로 친구랑 같이', '웹 브라우저에서 바로'], all, [[/pc|컴퓨터|스팀/i, 'PC로 한 번에 1시간 넘게'], [/콘솔|스위치/, '콘솔이나 TV로 친구랑 같이'], [/웹|브라우저/, '웹 브라우저에서 바로']]),
+      ));
+    case 'mood':
+      return out(ask(
+        `${subj}의 화면을 처음 본 친구는 어떤 분위기라고 느낄까요?`,
+        '프로필 사진 필터를 고르듯, 색과 그림체를 골라 보세요.',
+        favour(['말랑하고 귀여운 파스텔', '도트로 찍은 레트로 픽셀', '만화처럼 선이 굵고 밝은 그림', '어둡고 긴장되는 분위기', '현실에 가까운 사실적인 그림'], all, [[/무서|어두|공포|좀비|유령|하룻밤/, '어둡고 긴장되는 분위기'], [/꿈|기억|추억/, '몽환적이고 흐릿한 수채화'], [/귀여|느긋|힐링|따뜻|잔잔/, '말랑하고 귀여운 파스텔'], [/픽셀|도트|레트로/, '도트로 찍은 레트로 픽셀']]),
+        true,
+      ));
+    case 'audience':
+      return out(ask(
+        '머릿속에 딱 한 명을 떠올린다면, 이 게임을 제일 먼저 해 볼 사람은 누구인가요?',
+        '단톡방에 링크를 올렸을 때 ‘이거 뭐야?’ 하고 바로 눌러 볼 사람이요.',
+        favour(['게임을 잘 안 하는 친구', '매일 폰 게임 하는 친구', 'PC 게임 많이 하는 고수', '동생이나 어린 가족', '나 자신'], all, [[/친구|같이/, '매일 폰 게임 하는 친구'], [/아이|동생|가족/, '동생이나 어린 가족']]),
+        true,
+      ));
+    case 'unique': {
+      const combo = chars[0] && places[0] ? `${chars[0]}${josa(chars[0], '과', '와')} ${places[0]}의 의외의 조합` : places.length === 2 ? `${places[0]}${josa(places[0], '과', '와')} ${places[1]}의 의외의 조합` : null;
+      return out(ask(
+        `비슷한 게임은 이미 많을 텐데, ${subj}에만 있는 한 가지는 뭔가요?`,
+        '같은 떡볶이집이라도 그 집에만 있는 메뉴가 하나씩 있잖아요.',
+        [...(combo ? [combo] : []), '아무도 안 해 본 조작 방식', '할 때마다 바뀌는 세상', '친구의 행동이 내 게임에 영향을 줘요', '짧지만 오래 기억나는 이야기'].slice(0, 5),
+        true,
+      ));
+    }
+  }
+}
+
+/** Restate gate goal line, and the mock concept for the result screen (ELI5: what, analogy, details, so what). */
+export function goalLine(prompt: string, turns: Turn[]): string {
+  const role = said(turns, 'role').replace(/\(.*?\)/g, '').trim();
+  const loop = said(turns, 'loop');
+  if (role && loop) return `${role}${josa(role, '이', '가')} 되어 ${loop}${josa(loop, '을', '를')} 반복하는 게임이에요.`;
+  if (loop) return `${loop}${josa(loop, '을', '를')} 반복하는 게임이에요.`;
+  return `${quoted(short(prompt, 60), '을', '를')} 바탕으로 한 게임이에요.`;
+}
+
+const ANALOGY: Record<Kind, string> = {
+  grow: '다마고치를 키우던 느낌에 내 방 꾸미기를 더한 거라고 보면 돼요.',
+  puzzle: '매일 푸는 낱말 퍼즐처럼, 짧게 머리를 쓰고 ‘풀었다’ 하는 맛이에요.',
+  action: '리듬게임에서 노트를 딱 맞췄을 때의 손맛이 계속 이어지는 거예요.',
+  survive: '불 꺼진 학교에서 하는 술래잡기처럼, 들킬까 봐 숨죽이는 긴장이 한 판 내내 이어져요.',
+  story: '웹툰 다음 화가 궁금해서 계속 넘기게 되는 것과 비슷해요.',
+  versus: '친구랑 하던 가위바위보를 훨씬 깊고 길게 만든 거예요.',
+  other: '좋아하는 앱을 하루에 몇 번씩 열어 보듯, 짧게 들어와 조금씩 나아가는 게임이에요.',
+};
+const TITLE_TAIL: Record<Kind, string> = { grow: '키우기', puzzle: '퍼즐', action: '대작전', survive: '생존기', story: '이야기', versus: '대결', other: '모험' };
+
+export function mockConcept(prompt: string, turns: Turn[]): Concept {
+  const k = gameKind(prompt, turns);
+  const { chars, places } = themes(prompt);
+  const head = [...places.slice(0, 1), ...chars].join(' ') || '나만의';
+  const fun = said(turns, 'fun');
+  const loop = said(turns, 'loop');
+  const audience = said(turns, 'audience');
+  const platform = said(turns, 'platform');
+  const unique = said(turns, 'unique');
+  const role = said(turns, 'role');
+  const loops = picks(turns, 'loop');
+  const win = said(turns, 'win');
+  const moods = picks(turns, 'mood');
+  // "조금 더 자세히": how a session plays out, not the decisions table again.
+  const details = [
+    role && loops[0] && `처음 켜면 ‘${role}’ 입장에서 바로 ‘${loops[0]}’부터 해요.`,
+    loops.length > 1 ? `한 바퀴(계속 반복하는 흐름)는 ${loops.slice(0, 4).join(' → ')} → 다시 처음이에요.` : loops[0] && `한 바퀴(계속 반복하는 흐름)는 ‘${loops[0]}’ 하나로 단순하게 가요.`,
+    win && (/끝이 없/.test(win) ? '정해진 끝 없이 계속 이어지고, 그만큼 내 공간이 자라요.' : `한 판은 ‘${win}’ 규칙으로 끝나요.`),
+    platform && `‘${platform}’에 맞춰 한 판 길이와 조작을 짜요.`,
+    moods.length > 0 && `화면과 소리는 ${moods.slice(0, 3).map((m) => `‘${m}’`).join(', ')} 쪽으로 맞춰요.`,
+  ].filter((d): d is string => !!d);
+  return {
+    title: `${head} ${TITLE_TAIL[k]}`,
+    one_liner: goalLine(prompt, turns),
+    what: fun && loop ? `한마디로 ${fun}${josa(fun, '으로', '로')} ${loop}${josa(loop, '을', '를')} 계속하는 게임이에요.` : `한마디로 ${quoted(short(prompt, 40), '을', '를')} 직접 해 보는 게임이에요.`,
+    analogy: ANALOGY[k],
+    details: details.length ? details : [`처음 아이디어 “${short(prompt, 40)}”에서 출발해요.`, '질문에 더 답할수록 이 부분이 구체적으로 채워져요.'],
+    so_what: [
+      audience ? `‘${audience}’도 ${platform ? `‘${platform}’ 동안` : '부담 없이'} 바로 즐길 수 있어요.` : '처음 하는 사람도 바로 알아볼 수 있어요.',
+      unique ? `‘${unique}’ 덕분에 비슷한 게임 사이에서 기억에 남아요.` : '한 판이 끝나면 다음 판이 궁금해지게 만드는 게 목표예요.',
+    ].join(' '),
+  };
+}
+
+// ---------- LLM prompts and output validation ----------
+
+const ELI5_RULES = `Audience: Korean players aged 15-20 (ELI5 "Age 15" + "Senior High/College" styles).
+- Casual but not cringey, no "fellow kids" energy. Use "-요" polite casual Korean.
+- Analogies from games, phones, social media, school life.
+- One idea per sentence. Concrete over abstract.
+- Any jargon gets a definition inline, e.g. "코어 루프(게임에서 계속 반복하는 행동)".
+- No emoji, no marketing voice, no invented numbers or facts.`;
+
+export const QUESTION_SYSTEM = `You are a Socratic interviewer (ouroboros style) helping a teenager turn a vague game idea into clear decisions. You ONLY ask questions; never promise to build anything.
+Ambiguity tracks (keys and Korean labels): ${TRACKS.map((t) => `${t.key}=${t.label}`).join(', ')}.
+Rules for the question:
+- Exactly ONE question: 1-2 Korean sentences, only ONE question mark, and the text MUST end with "?". No "for example" follow-up question.
+- No preamble ("좋은 질문이에요", "알겠어요" etc. are banned).
+- Target the most ambiguous track (the caller suggests one; never use the caller's blocked track).
+- Build on previous answers; quote a short piece of them when it helps.
+- Ontological questions are welcome where useful ("이 게임은 결국 무엇을 하는 게임인가요?").
+- hint: one Korean line with an everyday analogy that makes the question easy to answer.
+- options: 3-5 short Korean answers (noun phrases, at most about 25 characters, no arrows or symbols), the FIRST one is your recommendation. Do not include "잘 모르겠어요" (the app adds it).
+- multi: true when several options can be true together.
+Re-score ambiguity for EVERY track from 0 (fully decided) to 1 (unknown), considering the prompt and all answers so far.
+${ELI5_RULES}
+Reply with JSON only: {"track":"<key>","question":"...","hint":"...","options":["..."],"multi":false,"allow_free":true,"ambiguity":{"fun":0.0,...},"done":false}
+Set "done": true (question may be empty) only when every track is clear enough to write a one-page game concept.`;
+
+export function questionUser(prompt: string, turns: Turn[], l: Ledger, target: TrackKey, blocked: TrackKey | null): string {
+  return JSON.stringify({
+    prompt,
+    answered: turns.filter((t) => t.answer).map((t) => ({ track: t.track, question: t.question, answer: decisionOf(t) })),
+    ambiguity_now: l,
+    suggested_track: target,
+    blocked_track: blocked,
+  });
+}
+
+const str = (v: unknown, max = 300) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+const PREAMBLE = /^(좋은|좋아요|좋네요|좋습니다|멋진|멋져요|훌륭|알겠|그렇군요|그렇구나|네[,.! ]|오[,.!~ ]|와[,.!~ ]|감사|재밌|흥미)/;
+
+/** ouroboros question rules: one question (one "?", at the end), 1-2 sentences, no preamble. */
+export function isOneQuestion(q: string): boolean {
+  const marks = q.match(/[?？]/g)?.length ?? 0;
+  const sentences = q.split(/(?<=[.!?？。])\s+/).filter(Boolean).length;
+  return marks === 1 && /[?？]$/.test(q) && sentences <= 2 && !/[!！]/.test(q) && !PREAMBLE.test(q);
+}
+
+/** Validate model output; null means "use the mock instead". */
+export function parseQuestion(raw: unknown, blocked: TrackKey | null): { q: Question | null; ledger: Partial<Ledger>; done: boolean } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const ledger: Partial<Ledger> = {};
+  const amb = (r.ambiguity ?? {}) as Record<string, unknown>;
+  for (const k of TRACK_KEYS) if (typeof amb[k] === 'number' && Number.isFinite(amb[k])) ledger[k] = clamp(amb[k] as number);
+  const done = r.done === true;
+  const track = r.track as TrackKey;
+  const question = str(r.question);
+  const options = Array.isArray(r.options) ? [...new Set(r.options.map((o) => str(o, 80)).filter((o) => o && o !== RECOMMEND))].slice(0, 5) : [];
+  const ok = TRACK_KEYS.includes(track) && track !== blocked && isOneQuestion(question) && options.length >= 3;
+  return { q: ok ? { track, question, hint: str(r.hint, 200), options, multi: r.multi === true, allow_free: r.allow_free !== false } : null, ledger, done };
+}
+
+export const CONCEPT_SYSTEM = `You turn a finished game-idea interview into a short ELI5 concept card in Korean.
+${ELI5_RULES}
+Structure (ELI5): start with the "what" in one sentence, then an analogy, then details, then the "so what".
+Reply with JSON only:
+{"title":"게임 이름(가제), 2-12 Korean chars, catchy but plain","one_liner":"one sentence","what":"이게 뭐냐면: one sentence","analogy":"비유하자면: 1-2 sentences","details":["3-6 short bullets"],"so_what":"그래서 왜 재밌냐면: 1-2 sentences"}
+Do not start values with the section names ("이게 뭐냐면:", "비유하자면:" ...); the app shows them as headings.
+Use only what the prompt and answers say; do not invent features, numbers or facts.`;
+
+export function conceptUser(prompt: string, turns: Turn[]): string {
+  return JSON.stringify({ prompt, decisions: decisions(turns).map(({ track, decision }) => ({ track, decision })) });
+}
+
+const LABEL = /^(이게 뭐냐면|비유하자면|조금 더 자세히|그래서 왜 재밌냐면)\s*[:：]\s*/;
+export function parseConcept(raw: unknown, fallback: Concept): Concept {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown, max = 300) => (typeof v === 'string' ? v.trim().replace(LABEL, '').slice(0, max) : '');
+  const details = Array.isArray(r.details) ? r.details.map((d) => str(d, 200)).filter(Boolean).slice(0, 8) : [];
+  return {
+    title: str(r.title, 40) || fallback.title,
+    one_liner: str(r.one_liner) || fallback.one_liner,
+    what: str(r.what) || fallback.what,
+    analogy: str(r.analogy) || fallback.analogy,
+    details: details.length ? details : fallback.details,
+    so_what: str(r.so_what) || fallback.so_what,
+  };
+}

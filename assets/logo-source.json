@@ -1,0 +1,27 @@
+{
+  "selected_reference": {
+    "file": "dribbble-deskflow-reference.jpg",
+    "title": "Deskflow — SaaS Workflow Logo Design",
+    "designer": "Khabib Khandakar",
+    "page_url": "https://dribbble.com/shots/26977771-Deskflow-SaaS-Workflow-Logo-Design",
+    "image_url": "https://cdn.dribbble.com/userupload/46366882/file/007d78a43d26ce78a9450cae4e5f9f5e.jpg",
+    "reason_ko": "단순한 기하학 심볼과 굵은 산세리프 워드마크의 가로 조합. 워크플로우와 생산성 서비스라는 맥락이 Super Planer에 적합하다.",
+    "usage_ko": "디자인 참고 이미지. 원작자의 이용 허락이나 상업용 라이선스는 확인되지 않았다."
+  },
+  "super_planer_concept": {
+    "files": [
+      "super-planer-logo.svg",
+      "super-planer-icon.svg"
+    ],
+    "type": "New SVG concept created for Super Planer; not a download or adaptation of the Deskflow mark.",
+    "concept_ko": "둥근 사각형 안의 S 형태 연결선으로 Super와 기획 흐름을 표현하고 Super Planer 텍스트를 결합했다.",
+    "colors": {
+      "symbol": "#4F46E5",
+      "wordmark": "#151923",
+      "line": "#FFFFFF"
+    },
+    "background": "transparent",
+    "typography": "Arial Bold outlines; no installed font or network dependency required",
+    "primary_file": "super-planer-logo.svg"
+  }
+}

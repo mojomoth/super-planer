@@ -1,0 +1,9 @@
+{
+  "name": "super-planer-pocs",
+  "private": true,
+  "workspaces": ["step1", "workflow-view", "plan-doc"],
+  "scripts": {
+    "dev": "node dev.mjs",
+    "build": "npm run build --workspaces"
+  }
+}

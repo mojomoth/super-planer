@@ -1,0 +1,763 @@
+=== package.json
+     1	{
+     2	  "name": "plan-doc",
+     3	  "private": true,
+     4	  "scripts": {
+     5	    "dev": "next dev -p 3103",
+     6	    "build": "next build",
+     7	    "start": "next start -p 3103",
+     8	    "test": "node --test lib/assemble.test.mjs"
+     9	  },
+    10	  "dependencies": {
+    11	    "next": "16.4.6",
+    12	    "react": "19.3.1",
+    13	    "react-dom": "19.3.1",
+    14	    "react-markdown": "10.1.0",
+    15	    "remark-gfm": "4.0.1",
+    16	    "@anthropic-ai/sdk": "^1.8.0"
+    17	  },
+    18	  "devDependencies": {
+    19	    "typescript": "^5.9.0",
+    20	    "@types/node": "^24",
+    21	    "@types/react": "^19",
+    22	    "@types/react-dom": "^19"
+    23	  }
+    24	}
+=== next.config.ts
+     1	import type { NextConfig } from 'next';
+     2	import path from 'node:path';
+     3	const nextConfig: NextConfig = { turbopack: { root: path.join(__dirname, '..') } };
+     4	export default nextConfig;
+=== lib/schema.ts
+     1	import path from 'node:path';
+     2	import { db } from './db';
+     3	
+     4	// plan-doc owns only plan_inputs and plan_docs (see pocs/CONTRACT.md).
+     5	export const UPLOAD_DIR = path.join(process.cwd(), '..', '.data', 'uploads');
+     6	
+     7	export type InputRow = { id: string; kind: 'decision' | 'image'; title: string; body: string | null; url: string | null; source: string | null; created_at: string };
+     8	export type DocRow = { id: string; title: string; markdown: string; provider: string | null; created_at: string };
+     9	
+    10	const g = globalThis as unknown as { __planDocInit?: boolean };
+    11	
+    12	export function store() {
+    13	  const d = db();
+    14	  if (!g.__planDocInit) {
+    15	    d.exec(`
+    16	      CREATE TABLE IF NOT EXISTS plan_inputs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT, url TEXT, source TEXT, created_at TEXT NOT NULL);
+    17	      CREATE TABLE IF NOT EXISTS plan_docs (id TEXT PRIMARY KEY, title TEXT NOT NULL, markdown TEXT NOT NULL, provider TEXT, created_at TEXT NOT NULL);
+    18	    `);
+    19	    const { n } = d.prepare('SELECT COUNT(*) AS n FROM plan_inputs').get() as { n: number };
+    20	    g.__planDocInit = true;
+    21	    if (n === 0) seed();
+    22	  }
+    23	  return d;
+    24	}
+    25	
+    26	export const now = () => new Date().toISOString();
+    27	
+    28	export function listInputs(): InputRow[] {
+    29	  return store().prepare('SELECT * FROM plan_inputs ORDER BY created_at, id').all() as InputRow[];
+    30	}
+    31	
+    32	export function listDocs(): Omit<DocRow, 'markdown'>[] {
+    33	  return store().prepare('SELECT id, title, provider, created_at FROM plan_docs ORDER BY created_at DESC LIMIT 50').all() as Omit<DocRow, 'markdown'>[];
+    34	}
+    35	
+    36	const SEED_DECISIONS: [string, string][] = [
+    37	  [
+    38	    '게임 가제와 한 줄 소개',
+    39	    `결정: 가제는 '버섯굴 수프집'으로 간다.
+    40	
+    41	- 가제: 버섯굴 수프집
+    42	- 한 줄 소개: 고슴도치 요리사가 밤마다 버섯굴에 내려가 재료를 모으고, 아침에는 그 재료로 수프를 파는 느긋한 로그라이트
+    43	- 장르: 코지 로그라이트
+    44	- 플랫폼: PC(Steam) 먼저, 반응을 보고 Switch 검토
+    45	- 타깃: 하루 20분 정도 짧게 끊어 하는 15~25세 플레이어`,
+    46	  ],
+    47	  [
+    48	    '코어 루프',
+    49	    `결정: 하루는 '밤 탐험 → 아침 장사' 두 단계로 나눈다.
+    50	
+    51	1. 밤: 등불을 들고 버섯굴에 내려간다 (방 3~5개, 매번 새로 생성)
+    52	2. 재료를 캐고, 길을 막는 벌레는 피하거나 가볍게 쫓아낸다
+    53	3. 등불 기름이 떨어지기 전에 돌아온다. 쓰러지면 재료의 절반만 챙긴다
+    54	4. 아침: 모은 재료로 수프를 끓여 손님에게 판다
+    55	5. 번 돈으로 등불, 가방, 냄비를 고쳐 다음 밤을 준비한다`,
+    56	  ],
+    57	  [
+    58	    '전투와 실패 규칙',
+    59	    `결정: 전투는 '피하기'가 중심이고, 실패해도 크게 잃지 않는다.
+    60	
+    61	- 공격 버튼은 하나(국자 휘두르기), 대신 구르기와 숨기가 더 강하다
+    62	- 쓰러져도 배운 레시피와 단골 손님은 그대로 남는다
+    63	- 열린 질문: 보스를 넣을지, 넣는다면 주마다 한 번이 적당한가?
+    64	- 리스크: 긴장감이 너무 낮으면 로그라이트 팬이 금방 지루해할 수 있다`,
+    65	  ],
+    66	  [
+    67	    '아트와 분위기',
+    68	    `결정: 둥근 실루엣과 따뜻한 등불 빛, 차가운 굴 배경의 대비로 간다.
+    69	
+    70	- 캐릭터는 2~3등신, 굵은 외곽선 없는 평면 채색
+    71	- 굴은 남색과 청록, 등불이 닿는 곳만 주황빛
+    72	- 수프 가게는 나무와 크림색으로, 굴과 정반대의 아늑함
+    73	- 소리는 물방울, 보글보글 끓는 소리 위주로 조용하게`,
+    74	  ],
+    75	  [
+    76	    '수프 가게 운영',
+    77	    `결정: 장사는 계산 게임이 아니라 손님 취향을 맞히는 퍼즐로 만든다.
+    78	
+    79	- 아침마다 손님 3명이 오고, 각자 취향 힌트를 한 줄 남긴다
+    80	- 취향을 맞히면 '단골도'가 오르고, 단골이 다음 밤에 쓸 도구를 준다
+    81	- 레시피는 재료 3칸 조합, 새 조합을 찾으면 도감에 기록된다
+    82	- 열린 질문: 가격 흥정을 넣으면 느긋한 분위기가 깨지지 않을까?`,
+    83	  ],
+    84	];
+    85	
+    86	const SEED_IMAGES: [string, string][] = [
+    87	  ['캐릭터 콘셉트: 등불을 든 고슴도치 요리사', '/samples/character.svg'],
+    88	  ['레벨 콘셉트: 등불이 닿는 버섯굴 방', '/samples/level.svg'],
+    89	  ['UI 시안: 수프 레시피 3칸 조합 화면', '/samples/ui.svg'],
+    90	  ['분위기: 새벽의 수프 가게', '/samples/mood.svg'],
+    91	];
+    92	
+    93	/** Insert the sample game inputs. Fixed ids, so running it twice changes nothing. */
+    94	export function seed() {
+    95	  const d = db();
+    96	  const ins = d.prepare('INSERT OR IGNORE INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    97	  const t = Date.now();
+    98	  SEED_DECISIONS.forEach(([title, body], i) => ins.run(`seed-d${i + 1}`, 'decision', title, body, null, 'seed', new Date(t + i).toISOString()));
+    99	  SEED_IMAGES.forEach(([title, url], i) => ins.run(`seed-i${i + 1}`, 'image', title, null, url, 'seed', new Date(t + 10 + i).toISOString()));
+   100	}
+=== lib/images.ts
+     1	// Pure image helpers (no I/O): upload sniffing and image-URL extraction from chat messages.
+     2	export const MAX_UPLOAD = 5 * 1024 * 1024;
+     3	
+     4	/** MIME type from magic bytes; only png/jpeg/gif/webp. SVG and everything else → null. */
+     5	export function sniffImage(b: Uint8Array): string | null {
+     6	  const ascii = (from: number, to: number) => String.fromCharCode(...b.subarray(from, to));
+     7	  if (b.length >= 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((v, i) => b[i] === v)) return 'image/png';
+     8	  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+     9	  if (b.length >= 6 && (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a')) return 'image/gif';
+    10	  if (b.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'image/webp';
+    11	  return null;
+    12	}
+    13	
+    14	/** True for an absolute https URL with a host. */
+    15	export function isHttpsUrl(s: string): boolean {
+    16	  try {
+    17	    const u = new URL(s);
+    18	    return u.protocol === 'https:' && !!u.hostname && !u.username && !u.password;
+    19	  } catch {
+    20	    return false;
+    21	  }
+    22	}
+    23	
+    24	const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+    25	
+    26	/** Image URLs in free text: links whose path ends in an image extension, or any picsum.photos link. */
+    27	export function extractImageUrls(text: string): string[] {
+    28	  const out: string[] = [];
+    29	  for (const m of text.matchAll(/https?:\/\/[^\s<>()"'`[\]]+/g)) {
+    30	    const raw = m[0].replace(/[.,;:!?。、]+$/, '');
+    31	    let u: URL;
+    32	    try {
+    33	      u = new URL(raw);
+    34	    } catch {
+    35	      continue;
+    36	    }
+    37	    if (IMAGE_EXT.test(u.pathname) || u.hostname === 'picsum.photos' || u.hostname.endsWith('.picsum.photos')) out.push(u.href);
+    38	  }
+    39	  return [...new Set(out)];
+    40	}
+=== lib/imports.ts
+     1	import { createHash } from 'node:crypto';
+     2	import { tableExists } from './db';
+     3	import { extractImageUrls } from './images';
+     4	import { store, now } from './schema';
+     5	
+     6	const hid = (prefix: string, ...parts: string[]) => `${prefix}_${createHash('sha1').update(parts.join('\n')).digest('hex').slice(0, 16)}`;
+     7	
+     8	export type ImportResult = { ids: string[]; message?: string };
+     9	
+    10	/** Frozen workflow cards → decision inputs, image URLs in their messages → image inputs. Idempotent per card/URL. */
+    11	export function importWorkflow(workflowId: string): ImportResult {
+    12	  const d = store();
+    13	  if (!['wf_workflows', 'wf_cards', 'wf_messages'].every(tableExists)) return { ids: [], message: '워크플로우 데이터가 아직 없어요. 워크플로우 화면을 먼저 열어 주세요.' };
+    14	  const wf = d.prepare('SELECT id, title FROM wf_workflows WHERE id = ?').get(workflowId) as { id: string; title: string } | undefined;
+    15	  if (!wf) return { ids: [], message: '이 워크플로우를 찾지 못했어요.' };
+    16	  const cards = d
+    17	    .prepare("SELECT id, title, decision FROM wf_cards WHERE workflow_id = ? AND status = 'frozen' ORDER BY y, x")
+    18	    .all(workflowId) as { id: string; title: string; decision: string | null }[];
+    19	  if (!cards.length) return { ids: [], message: `'${wf.title}'에 동결된 카드가 없어요. 카드를 동결한 뒤 다시 가져와 주세요.` };
+    20	
+    21	  const source = `wf:${workflowId}`;
+    22	  const upsert = d.prepare(
+    23	    "INSERT INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, 'decision', ?, ?, NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, body = excluded.body",
+    24	  );
+    25	  const addImg = d.prepare("INSERT OR IGNORE INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, 'image', ?, NULL, ?, ?, ?)");
+    26	  const msgs = d.prepare('SELECT content FROM wf_messages WHERE card_id = ? ORDER BY created_at');
+    27	  const ids: string[] = [];
+    28	  for (const c of cards) {
+    29	    const id = hid('wfc', source, c.id);
+    30	    upsert.run(id, c.title.slice(0, 200), `결정: ${(c.decision ?? '').trim() || '(결정 요약 없음)'}`, source, now());
+    31	    ids.push(id);
+    32	    const urls = (msgs.all(c.id) as { content: string }[]).flatMap((m) => extractImageUrls(m.content));
+    33	    [...new Set(urls)].forEach((url, i) => {
+    34	      const imgId = hid('wfi', source, url);
+    35	      addImg.run(imgId, `${c.title.slice(0, 160)} 참고 이미지 ${i + 1}`, url, source, now());
+    36	      ids.push(imgId);
+    37	    });
+    38	  }
+    39	  return { ids: [...new Set(ids)] };
+    40	}
+    41	
+    42	type Concept = { what?: string; analogy?: string; details?: string[]; so_what?: string; decisions?: { track?: string; decision?: string }[] };
+    43	
+    44	export function listStep1(): { session_id: string; title: string; one_liner: string; created_at: string }[] {
+    45	  store();
+    46	  if (!tableExists('step1_results')) return [];
+    47	  return store().prepare('SELECT session_id, title, one_liner, created_at FROM step1_results ORDER BY created_at DESC LIMIT 20').all() as never;
+    48	}
+    49	
+    50	/** One Step1 result → one decision input holding the ELI5 concept. */
+    51	export function importStep1(sessionId: string): ImportResult {
+    52	  const d = store();
+    53	  if (!tableExists('step1_results')) return { ids: [], message: 'Step1 결과가 아직 없어요.' };
+    54	  const r = d.prepare('SELECT session_id, title, one_liner, concept FROM step1_results WHERE session_id = ?').get(sessionId) as
+    55	    | { session_id: string; title: string; one_liner: string; concept: string }
+    56	    | undefined;
+    57	  if (!r) return { ids: [], message: '이 Step1 결과를 찾지 못했어요.' };
+    58	  let c: Concept = {};
+    59	  try {
+    60	    c = JSON.parse(r.concept) as Concept;
+    61	  } catch {
+    62	    // keep the title and one-liner even if the concept JSON is broken
+    63	  }
+    64	  const lines = [`결정: ${r.one_liner}`, '', `- 가제: ${r.title}`, `- 한 줄 소개: ${r.one_liner}`];
+    65	  if (c.what) lines.push('', '#### 한 줄 요약', '', c.what);
+    66	  if (c.analogy) lines.push('', '#### 비유로 말하면', '', c.analogy);
+    67	  if (Array.isArray(c.details) && c.details.length) lines.push('', '#### 자세히', '', ...c.details.map((x) => `- ${String(x)}`));
+    68	  if (c.so_what) lines.push('', '#### 그래서 뭐가 좋아?', '', c.so_what);
+    69	  if (Array.isArray(c.decisions) && c.decisions.length)
+    70	    lines.push('', '#### 결정한 것들', '', ...c.decisions.map((x) => `- ${x.track ?? '항목'}: ${x.decision ?? ''}`));
+    71	  const source = `step1:${r.session_id}`;
+    72	  const id = hid('s1', source);
+    73	  d.prepare(
+    74	    "INSERT INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, 'decision', ?, ?, NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, body = excluded.body",
+    75	  ).run(id, `${r.title} 콘셉트`.slice(0, 200), lines.join('\n'), source, now());
+    76	  return { ids: [id] };
+    77	}
+=== lib/assemble.ts
+     1	// Pure Markdown assembly for the plan document (no I/O, so lib/assemble.test.ts can run it with node --test).
+     2	export type Decision = { id: string; title: string; body: string; source: string | null };
+     3	export type ImageInput = { id: string; title: string; url: string; source: string | null };
+     4	
+     5	export const SECTIONS = ['개요', '핵심 재미', '코어 루프', '주요 시스템', '아트·분위기', '결정 로그', '열린 질문/리스크', '다음 단계'] as const;
+     6	
+     7	const FALLBACK_TITLE = '이름 미정 게임';
+     8	
+     9	/** Escape a value for one GFM table cell: one line, pipes escaped. */
+    10	export function cell(text: string): string {
+    11	  return text.replace(/\s*\r?\n\s*/g, ' ').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').trim() || '-';
+    12	}
+    13	
+    14	/** `![caption](url)` with the caption and URL made safe for Markdown. */
+    15	export function imageMd(img: Pick<ImageInput, 'title' | 'url'>): string {
+    16	  const alt = img.title.replace(/\s+/g, ' ').replace(/([[\]\\])/g, '\\$1').trim() || '이미지';
+    17	  return `![${alt}](${mdUrl(img.url)})`;
+    18	}
+    19	
+    20	const mdUrl = (url: string) => url.replace(/[\s()<>]/g, (c) => encodeURIComponent(c));
+    21	
+    22	export function sourceLabel(source: string | null): string {
+    23	  if (!source) return '직접 입력';
+    24	  if (source === 'seed') return '예시';
+    25	  if (source === 'upload' || source === 'manual') return '직접 입력';
+    26	  if (source.startsWith('wf:')) return '워크플로우';
+    27	  if (source.startsWith('step1:')) return 'Step1';
+    28	  return source;
+    29	}
+    30	
+    31	const plain = (line: string) => line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').replace(/\*\*|__|`/g, '').trim();
+    32	
+    33	/** `키: 값` lines (also `- **키**: 값`) from a decision body. */
+    34	function keyValues(body: string): Map<string, string> {
+    35	  const out = new Map<string, string>();
+    36	  for (const raw of body.split('\n')) {
+    37	    const m = plain(raw).match(/^([^:：]{1,20})[:：]\s*(.+)$/);
+    38	    if (m) out.set(m[1].trim(), m[2].trim());
+    39	  }
+    40	  return out;
+    41	}
+    42	
+    43	function find(decisions: Decision[], keys: string[]): string | undefined {
+    44	  for (const d of decisions) {
+    45	    const kv = keyValues(d.body);
+    46	    for (const k of keys) if (kv.get(k)) return kv.get(k);
+    47	  }
+    48	}
+    49	
+    50	const has = (d: Decision, words: string[]) => words.some((w) => d.title.includes(w));
+    51	
+    52	/** First line of a decision that reads as its conclusion. */
+    53	export function summary(d: Decision): string {
+    54	  const lines = d.body.split('\n').map(plain).filter((l) => l && !l.startsWith('#'));
+    55	  const line = lines.find((l) => /^결정\s*[:：]/.test(l)) ?? lines[0] ?? d.title;
+    56	  return line.replace(/^결정\s*[:：]\s*/, '') || d.title;
+    57	}
+    58	
+    59	export function gameTitle(decisions: Decision[]): string {
+    60	  return find(decisions, ['가제', '게임 이름', '제목']) ?? FALLBACK_TITLE;
+    61	}
+    62	
+    63	/** Lines tagged as open questions or risks, or lines that end in a question mark. */
+    64	function openItems(decisions: Decision[]): string[] {
+    65	  const out: string[] = [];
+    66	  for (const d of decisions) {
+    67	    for (const raw of d.body.split('\n')) {
+    68	      const l = plain(raw);
+    69	      if (l.startsWith('#')) continue;
+    70	      const tagged = l.match(/^(열린 질문|질문|리스크|미정)[:：]\s*(.+)$/);
+    71	      if (tagged) out.push(`${tagged[1] === '리스크' ? '리스크' : '질문'}: ${tagged[2]} (${d.title})`);
+    72	      else if (/[?？]$/.test(l)) out.push(`질문: ${l} (${d.title})`);
+    73	    }
+    74	  }
+    75	  return [...new Set(out)];
+    76	}
+    77	
+    78	/** Numbered list items from the decision that describes the loop. */
+    79	function loopSteps(decisions: Decision[]): string[] {
+    80	  const d = decisions.find((x) => has(x, ['루프', '흐름']));
+    81	  if (!d) return [];
+    82	  return d.body.split('\n').filter((l) => /^\s*\d+[.)]\s+/.test(l)).map(plain);
+    83	}
+    84	
+    85	/** Body without the `키: 값` lines already shown elsewhere. */
+    86	function bodyRest(body: string, drop: string[]): string {
+    87	  return body
+    88	    .split('\n')
+    89	    .filter((l) => !drop.some((k) => new RegExp(`^${k}\\s*[:：]`).test(plain(l))))
+    90	    .join('\n')
+    91	    .trim();
+    92	}
+    93	
+    94	const OVERVIEW_KEYS = ['가제', '게임 이름', '제목', '한 줄 소개', '장르', '플랫폼', '타깃'];
+    95	const OPEN_KEYS = ['열린 질문', '질문', '리스크', '미정'];
+    96	
+    97	/** Deterministic plan document built only from the given inputs. */
+    98	export function assemble(decisions: Decision[], images: ImageInput[]): { title: string; markdown: string } {
+    99	  const title = gameTitle(decisions);
+   100	  const pick = (keys: string[]) => find(decisions, keys) ?? '아직 정하지 않았어요';
+   101	  const loopDec = decisions.find((x) => has(x, ['루프', '흐름']));
+   102	  const artDecs = decisions.filter((x) => has(x, ['아트', '분위기', '비주얼']));
+   103	  const funDecs = decisions.filter((x) => has(x, ['재미', '콘셉트', '컨셉']));
+   104	  // A decision whose body is only overview lines (가제, 장르, ...) already lives in 개요.
+   105	  const detail = (x: Decision) => bodyRest(x.body, [...OVERVIEW_KEYS, ...OPEN_KEYS, '결정']);
+   106	  const systemDecs = decisions.filter((x) => x !== loopDec && !artDecs.includes(x) && detail(x));
+   107	  const funFrom = funDecs.length ? funDecs : decisions.filter((x) => x !== loopDec && detail(x));
+   108	
+   109	  const md: string[] = [`# ${title} 기획서`, ''];
+   110	
+   111	  md.push('## 개요', '');
+   112	  md.push(`- 한 줄 소개: ${pick(['한 줄 소개', '한 줄 요약'])}`);
+   113	  md.push(`- 장르: ${pick(['장르'])}`);
+   114	  md.push(`- 플랫폼: ${pick(['플랫폼'])}`);
+   115	  md.push(`- 타깃: ${pick(['타깃', '대상'])}`, '');
+   116	
+   117	  md.push('## 핵심 재미', '');
+   118	  const fun = (funFrom.length ? funFrom : decisions).map((d) => `- ${summary(d)}`);
+   119	  md.push(...(fun.length ? fun : ['- 결정 문서가 없어요. 결정을 하나 이상 고른 뒤 다시 만들어 주세요.']), '');
+   120	
+   121	  md.push('## 코어 루프', '');
+   122	  const steps = loopSteps(decisions);
+   123	  md.push(...(steps.length ? steps : decisions.slice(0, 5).map((d) => d.title)).map((s, i) => `${i + 1}. ${s}`));
+   124	  if (!steps.length && !decisions.length) md.push('1. 코어 루프를 정한 결정 문서가 아직 없어요.');
+   125	  md.push('');
+   126	
+   127	  md.push('## 주요 시스템', '');
+   128	  if (!systemDecs.length) md.push('주요 시스템을 다룬 결정 문서가 아직 없어요.', '');
+   129	  for (const d of systemDecs) {
+   130	    const rest = bodyRest(d.body, [...OVERVIEW_KEYS, ...OPEN_KEYS]).replace(/^#{1,6}\s/gm, '#### ');
+   131	    md.push(`### ${d.title}`, '', rest || summary(d), '');
+   132	  }
+   133	
+   134	  md.push('## 아트·분위기', '');
+   135	  for (const d of artDecs) md.push(bodyRest(d.body, OPEN_KEYS).replace(/^#{1,6}\s/gm, '#### '), '');
+   136	  if (!artDecs.length && !images.length) md.push('아트 방향을 정한 결정이나 이미지가 아직 없어요.', '');
+   137	  for (const img of images) md.push(imageMd(img), '');
+   138	
+   139	  md.push('## 결정 로그', '', '| 항목 | 결정 | 출처 |', '| --- | --- | --- |');
+   140	  for (const d of decisions) md.push(`| ${cell(d.title)} | ${cell(summary(d))} | ${cell(sourceLabel(d.source))} |`);
+   141	  if (!decisions.length) md.push('| - | 선택한 결정 문서가 없어요 | - |');
+   142	  md.push('');
+   143	
+   144	  md.push('## 열린 질문/리스크', '');
+   145	  const open = openItems(decisions);
+   146	  md.push(...(open.length ? open.map((o) => `- ${o}`) : ['- 결정 문서에서 열린 질문을 찾지 못했어요. 검토할 때 채워 주세요.']), '');
+   147	
+   148	  md.push('## 다음 단계', '');
+   149	  const next = ['결정 로그를 팀과 함께 검토하고 빠진 결정을 채우기', '코어 루프 한 바퀴를 종이 프로토타입으로 돌려 보기'];
+   150	  if (open.length) next.push('열린 질문마다 담당자와 답할 날짜 정하기');
+   151	  if (!images.length) next.push('아트 레퍼런스 이미지를 모아 분위기 정하기');
+   152	  md.push(...next.map((s, i) => `${i + 1}. ${s}`), '');
+   153	
+   154	  return { title, markdown: md.join('\n') };
+   155	}
+   156	
+   157	/** Section names missing from a Markdown document (H1 `… 기획서` counts as `title`). */
+   158	export function missingSections(markdown: string): string[] {
+   159	  const heads = markdown.split('\n').filter((l) => /^##\s/.test(l)).map((l) => l.replace(/^##\s+/, ''));
+   160	  const missing: string[] = SECTIONS.filter((s) => !heads.some((h) => h.includes(s)));
+   161	  if (!/^#\s+.+기획서\s*$/m.test(markdown)) missing.unshift('title');
+   162	  return missing;
+   163	}
+   164	
+   165	/** Make sure every image is embedded: missing ones go at the end of the 아트·분위기 section. */
+   166	export function ensureImages(markdown: string, images: ImageInput[]): string {
+   167	  const absent = images.filter((img) => !markdown.includes(`](${mdUrl(img.url)}`));
+   168	  if (!absent.length) return markdown;
+   169	  const block = absent.map(imageMd).join('\n\n');
+   170	  const lines = markdown.split('\n');
+   171	  const art = lines.findIndex((l) => /^##\s.*아트/.test(l));
+   172	  if (art < 0) return `${markdown.trimEnd()}\n\n## 아트·분위기\n\n${block}\n`;
+   173	  let end = lines.findIndex((l, i) => i > art && /^##\s/.test(l));
+   174	  if (end < 0) end = lines.length;
+   175	  lines.splice(end, 0, block, '');
+   176	  return lines.join('\n');
+   177	}
+=== lib/assemble.test.mjs
+     1	// Self-check: npm test -w plan-doc  (node --test lib/assemble.test.mjs; Node 22.6+ strips the .ts types)
+     2	import test from 'node:test';
+     3	import assert from 'node:assert/strict';
+     4	import { assemble, cell, ensureImages, imageMd, missingSections, SECTIONS } from './assemble.ts';
+     5	import { extractImageUrls, isHttpsUrl, sniffImage } from './images.ts';
+     6	
+     7	const decisions = [
+     8	  { id: 'a', title: '가제', body: '- 가제: 버섯굴 수프집\n- 장르: 코지 로그라이트\n- 플랫폼: PC\n- 타깃: 15~25세\n- 한 줄 소개: 수프를 판다', source: 'seed' },
+     9	  { id: 'b', title: '코어 루프', body: '1. 탐험\n2. 채집\n3. 장사', source: 'wf:w1' },
+    10	  { id: 'c', title: '전투 | 실패', body: '결정: 피하기 | 숨기 중심\n- 열린 질문: 보스가 필요할까?', source: 'step1:s1' },
+    11	  { id: 'd', title: '아트 방향', body: '둥근 실루엣', source: null },
+    12	];
+    13	const images = [
+    14	  { id: 'i1', title: '캐릭터 [초안]', url: '/samples/character.svg', source: 'seed' },
+    15	  { id: 'i2', title: '굴 (원격)', url: 'https://picsum.photos/seed/cave/640/400', source: 'wf:w1' },
+    16	];
+    17	
+    18	test('assemble: every section, title, numbered loop', () => {
+    19	  const { title, markdown } = assemble(decisions, images);
+    20	  assert.equal(title, '버섯굴 수프집');
+    21	  assert.match(markdown, /^# 버섯굴 수프집 기획서$/m);
+    22	  assert.deepEqual(missingSections(markdown), []);
+    23	  for (const s of SECTIONS) assert.match(markdown, new RegExp(`^## ${s}$`, 'm'));
+    24	  assert.match(markdown, /^1\. 탐험\n2\. 채집\n3\. 장사$/m);
+    25	  assert.match(markdown, /장르: 코지 로그라이트/);
+    26	  assert.match(markdown, /질문: 보스가 필요할까\?/);
+    27	});
+    28	
+    29	test('assemble: every image embedded as ![caption](url) in the art section', () => {
+    30	  const { markdown } = assemble(decisions, images);
+    31	  const art = markdown.slice(markdown.indexOf('## 아트·분위기'), markdown.indexOf('## 결정 로그'));
+    32	  for (const img of images) assert.ok(art.includes(imageMd(img)), img.url);
+    33	  assert.ok(art.includes('![캐릭터 \\[초안\\]](/samples/character.svg)'));
+    34	});
+    35	
+    36	test('decision table escapes pipes and stays one row per decision', () => {
+    37	  const { markdown } = assemble(decisions, images);
+    38	  assert.ok(markdown.includes('| 전투 \\| 실패 | 피하기 \\| 숨기 중심 | Step1 |'));
+    39	  const rows = markdown.split('\n').filter((l) => l.startsWith('| ') && !l.startsWith('| 항목') && !l.startsWith('| ---'));
+    40	  assert.equal(rows.length, decisions.length);
+    41	  assert.equal(cell('a\nb|c'), 'a b\\|c');
+    42	});
+    43	
+    44	test('assemble with no inputs still has every section', () => {
+    45	  assert.deepEqual(missingSections(assemble([], []).markdown), []);
+    46	});
+    47	
+    48	test('ensureImages adds missing images into the art section only', () => {
+    49	  const md = '# X 기획서\n\n## 아트·분위기\n\n글\n\n## 결정 로그\n\n표\n';
+    50	  const out = ensureImages(md, images);
+    51	  const art = out.slice(out.indexOf('## 아트'), out.indexOf('## 결정 로그'));
+    52	  for (const img of images) assert.ok(art.includes(imageMd(img)));
+    53	  assert.equal(ensureImages(out, images), out);
+    54	  assert.ok(ensureImages('# X 기획서\n', images).includes('## 아트·분위기'));
+    55	});
+    56	
+    57	test('missingSections reports what is absent', () => {
+    58	  assert.deepEqual(missingSections('## 개요\n'), ['title', ...SECTIONS.slice(1)]);
+    59	});
+    60	
+    61	test('sniffImage accepts png/jpeg/gif/webp by magic bytes, rejects svg and lies', () => {
+    62	  const b = (...xs) => new Uint8Array(xs);
+    63	  const s = (str) => new TextEncoder().encode(str);
+    64	  assert.equal(sniffImage(b(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0)), 'image/png');
+    65	  assert.equal(sniffImage(b(0xff, 0xd8, 0xff, 0xe0)), 'image/jpeg');
+    66	  assert.equal(sniffImage(s('GIF89a....')), 'image/gif');
+    67	  assert.equal(sniffImage(s('RIFF\0\0\0\0WEBPVP8 ')), 'image/webp');
+    68	  assert.equal(sniffImage(s('<svg xmlns="http://www.w3.org/2000/svg"></svg>')), null);
+    69	  assert.equal(sniffImage(s('<?xml version="1.0"?><svg/>')), null);
+    70	  assert.equal(sniffImage(b()), null);
+    71	});
+    72	
+    73	test('extractImageUrls finds image links and picsum, ignores pages', () => {
+    74	  const text = '참고: https://example.com/a.png, ![x](https://cdn.example.com/b.webp) https://picsum.photos/seed/x/640/400. https://example.com/page 그리고 https://example.com/a.png';
+    75	  assert.deepEqual(extractImageUrls(text), ['https://example.com/a.png', 'https://cdn.example.com/b.webp', 'https://picsum.photos/seed/x/640/400']);
+    76	  assert.ok(isHttpsUrl('https://example.com/x.png'));
+    77	  assert.ok(!isHttpsUrl('http://example.com/x.png'));
+    78	  assert.ok(!isHttpsUrl('javascript:alert(1)'));
+    79	  assert.ok(!isHttpsUrl('https://user:pw@example.com/x.png'));
+    80	});
+    81	
+    82	test('overview-only decision stays out of 핵심 재미 and 주요 시스템', () => {
+    83	  const { markdown } = assemble(decisions, images);
+    84	  const body = markdown.slice(markdown.indexOf('## 핵심 재미'), markdown.indexOf('## 아트·분위기'));
+    85	  assert.ok(!body.includes('### 가제'));
+    86	  assert.ok(!/^- 결정:/m.test(markdown));
+    87	});
+=== app/api/docs/route.ts
+     1	import { NextResponse } from 'next/server';
+     2	import { listDocs } from '@/lib/schema';
+     3	
+     4	export const runtime = 'nodejs';
+     5	export const dynamic = 'force-dynamic';
+     6	
+     7	export function GET() {
+     8	  return NextResponse.json({ docs: listDocs() });
+     9	}
+=== app/api/generate/route.ts
+     1	import { randomUUID } from 'node:crypto';
+     2	import { NextResponse } from 'next/server';
+     3	import { assemble, ensureImages, missingSections, sourceLabel, type Decision, type ImageInput } from '@/lib/assemble';
+     4	import { completeJSON } from '@/lib/llm';
+     5	import { now, store, type InputRow } from '@/lib/schema';
+     6	
+     7	export const runtime = 'nodejs';
+     8	
+     9	const SYSTEM = `너는 게임 기획 리드다. 팀이 내린 결정 문서와 참고 이미지를 받아 한국어 기획서를 Markdown으로 쓴다.
+    10	규칙:
+    11	- 결정 문서에 있는 내용만 쓴다. 없는 수치, 일정, 인원, 매출은 지어내지 않는다. 정해지지 않은 것은 '아직 정하지 않았어요'라고 쓰고 열린 질문에 넣는다.
+    12	- 15~20세도 한 번에 이해할 쉬운 문장. 마케팅 말투, 이모지 금지. HTML 태그 금지.
+    13	- 구조는 정확히 이 순서:
+    14	  # <게임 가제> 기획서
+    15	  ## 개요  (불릿: 한 줄 소개, 장르, 플랫폼, 타깃)
+    16	  ## 핵심 재미
+    17	  ## 코어 루프  (번호 목록 1. 2. 3.)
+    18	  ## 주요 시스템  (시스템마다 ### 소제목)
+    19	  ## 아트·분위기  (주어진 이미지를 모두 ![캡션](url) 형태로, url은 받은 그대로, 이미지마다 빈 줄로 구분)
+    20	  ## 결정 로그  (GFM 표: | 항목 | 결정 | 출처 |, 셀 안의 | 는 \\| 로 이스케이프)
+    21	  ## 열린 질문/리스크
+    22	  ## 다음 단계  (번호 목록)
+    23	출력은 JSON 하나만: {"title": "<게임 가제>", "markdown": "<문서 전체>"}`;
+    24	
+    25	export async function POST(req: Request) {
+    26	  const b = (await req.json().catch(() => null)) as { decisionIds?: unknown; imageIds?: unknown } | null;
+    27	  const ids = (v: unknown) => (Array.isArray(v) && v.length <= 200 && v.every((x) => typeof x === 'string' && x.length <= 200) ? (v as string[]) : null);
+    28	  const decisionIds = ids(b?.decisionIds);
+    29	  const imageIds = ids(b?.imageIds);
+    30	  if (!decisionIds || !imageIds) return NextResponse.json({ error: 'decisionIds와 imageIds는 문자열 배열이어야 해요.' }, { status: 400 });
+    31	  if (!decisionIds.length) return NextResponse.json({ error: '결정 문서를 하나 이상 골라 주세요.' }, { status: 400 });
+    32	
+    33	  const d = store();
+    34	  const rows = d.prepare('SELECT * FROM plan_inputs ORDER BY created_at, id').all() as InputRow[];
+    35	  const decisions: Decision[] = rows
+    36	    .filter((r) => r.kind === 'decision' && decisionIds.includes(r.id))
+    37	    .map((r) => ({ id: r.id, title: r.title, body: r.body ?? '', source: r.source }));
+    38	  const images: ImageInput[] = rows
+    39	    .filter((r) => r.kind === 'image' && r.url && imageIds.includes(r.id))
+    40	    .map((r) => ({ id: r.id, title: r.title, url: r.url!, source: r.source }));
+    41	  if (!decisions.length) return NextResponse.json({ error: '고른 결정 문서를 찾지 못했어요. 목록을 새로 불러와 주세요.' }, { status: 404 });
+    42	
+    43	  const fallback = () => assemble(decisions, images);
+    44	  const user = JSON.stringify({
+    45	    decisions: decisions.map((x) => ({ title: x.title, body: x.body, source: sourceLabel(x.source) })),
+    46	    images: images.map((x) => ({ caption: x.title, url: x.url })),
+    47	  });
+    48	  const r = await completeJSON<{ title?: unknown; markdown?: unknown }>(SYSTEM, user, fallback);
+    49	  let { title, markdown } = r.data;
+    50	  let provider: string = r.provider;
+    51	  let error = r.error;
+    52	  if (typeof markdown !== 'string' || typeof title !== 'string' || missingSections(markdown).length) {
+    53	    if (provider !== 'mock') error = `${provider} 결과에 빠진 섹션이 있어 기본 조립 문서로 대신했어요.`;
+    54	    ({ title, markdown } = fallback());
+    55	    provider = 'mock';
+    56	  }
+    57	  const doc = {
+    58	    id: randomUUID(),
+    59	    title: String(title).trim().slice(0, 200) || '제목 없는 기획서',
+    60	    markdown: ensureImages(String(markdown), images),
+    61	    provider,
+    62	    created_at: now(),
+    63	  };
+    64	  d.prepare('INSERT INTO plan_docs (id, title, markdown, provider, created_at) VALUES (?, ?, ?, ?, ?)').run(doc.id, doc.title, doc.markdown, doc.provider, doc.created_at);
+    65	  return NextResponse.json({ doc, error });
+    66	}
+=== app/api/import/route.ts
+     1	import { NextResponse } from 'next/server';
+     2	import { importStep1, importWorkflow, listStep1 } from '@/lib/imports';
+     3	import { listInputs } from '@/lib/schema';
+     4	
+     5	export const runtime = 'nodejs';
+     6	export const dynamic = 'force-dynamic';
+     7	
+     8	export function GET() {
+     9	  return NextResponse.json({ step1: listStep1() });
+    10	}
+    11	
+    12	/** Body: { workflow: id } or { step1: session_id }. Returns the imported input ids and the full input list. */
+    13	export async function POST(req: Request) {
+    14	  const b = (await req.json().catch(() => null)) as { workflow?: unknown; step1?: unknown } | null;
+    15	  const ok = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 200;
+    16	  const r = ok(b?.workflow) ? importWorkflow(b.workflow) : ok(b?.step1) ? importStep1(b.step1) : null;
+    17	  if (!r) return NextResponse.json({ error: 'workflow 또는 step1 id가 필요해요.' }, { status: 400 });
+    18	  return NextResponse.json({ ...r, inputs: listInputs() }, { status: r.ids.length ? 200 : 404 });
+    19	}
+=== app/api/inputs/route.ts
+     1	import { randomUUID } from 'node:crypto';
+     2	import fs from 'node:fs/promises';
+     3	import path from 'node:path';
+     4	import { NextResponse } from 'next/server';
+     5	import { isHttpsUrl, MAX_UPLOAD, sniffImage } from '@/lib/images';
+     6	import { listInputs, now, store, UPLOAD_DIR } from '@/lib/schema';
+     7	
+     8	export const runtime = 'nodejs';
+     9	export const dynamic = 'force-dynamic';
+    10	
+    11	const bad = (error: string, status = 400) => NextResponse.json({ error }, { status });
+    12	const str = (v: unknown, max: number) => (typeof v === 'string' && v.trim() && v.length <= max ? v.trim() : null);
+    13	
+    14	export function GET() {
+    15	  return NextResponse.json({ inputs: listInputs() });
+    16	}
+    17	
+    18	export async function POST(req: Request) {
+    19	  const d = store();
+    20	  const insert = d.prepare('INSERT INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    21	
+    22	  if ((req.headers.get('content-type') ?? '').startsWith('multipart/form-data')) {
+    23	    if (Number(req.headers.get('content-length') ?? 0) > MAX_UPLOAD + 64 * 1024) return bad('이미지는 5MB 이하만 올릴 수 있어요.', 413);
+    24	    const form = await req.formData().catch(() => null);
+    25	    const file = form?.get('file');
+    26	    if (!(file instanceof File) || file.size === 0) return bad('이미지 파일을 골라 주세요.');
+    27	    if (file.size > MAX_UPLOAD) return bad('이미지는 5MB 이하만 올릴 수 있어요.', 413);
+    28	    const bytes = new Uint8Array(await file.arrayBuffer());
+    29	    if (!sniffImage(bytes)) return bad('PNG, JPG, WEBP, GIF 이미지만 올릴 수 있어요.', 415);
+    30	    const caption = str(form?.get('title'), 200) ?? (file.name.replace(/\.[^.]+$/, '').slice(0, 200) || '업로드한 이미지');
+    31	    const id = randomUUID();
+    32	    await fs.mkdir(UPLOAD_DIR, { recursive: true });
+    33	    await fs.writeFile(path.join(UPLOAD_DIR, id), bytes);
+    34	    insert.run(id, 'image', caption, null, `/api/images/${id}`, 'upload', now());
+    35	    return NextResponse.json({ input: d.prepare('SELECT * FROM plan_inputs WHERE id = ?').get(id) }, { status: 201 });
+    36	  }
+    37	
+    38	  const b = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+    39	  if (!b) return bad('요청 형식이 올바르지 않아요.');
+    40	  const title = str(b.title, 200);
+    41	  if (!title) return bad('제목을 200자 이내로 적어 주세요.');
+    42	  const id = randomUUID();
+    43	  if (b.kind === 'decision') {
+    44	    const body = typeof b.body === 'string' && b.body.length <= 20000 ? b.body : null;
+    45	    if (body === null) return bad('본문은 20,000자 이내로 적어 주세요.');
+    46	    insert.run(id, 'decision', title, body, null, 'manual', now());
+    47	  } else if (b.kind === 'image') {
+    48	    const url = str(b.url, 2000);
+    49	    if (!url || !isHttpsUrl(url)) return bad('https:// 로 시작하는 이미지 주소를 넣어 주세요.');
+    50	    insert.run(id, 'image', title, null, url, 'manual', now());
+    51	  } else return bad('kind는 decision 또는 image여야 해요.');
+    52	  return NextResponse.json({ input: d.prepare('SELECT * FROM plan_inputs WHERE id = ?').get(id) }, { status: 201 });
+    53	}
+=== app/api/seed/route.ts
+     1	import { NextResponse } from 'next/server';
+     2	import { listInputs, seed, store } from '@/lib/schema';
+     3	
+     4	export const runtime = 'nodejs';
+     5	
+     6	export function POST() {
+     7	  store();
+     8	  seed();
+     9	  return NextResponse.json({ inputs: listInputs() });
+    10	}
+=== app/api/docs/[id]/route.ts
+     1	import { NextResponse } from 'next/server';
+     2	import { store } from '@/lib/schema';
+     3	
+     4	export const runtime = 'nodejs';
+     5	
+     6	type Ctx = { params: Promise<{ id: string }> };
+     7	
+     8	export async function GET(_req: Request, { params }: Ctx) {
+     9	  const { id } = await params;
+    10	  const doc = store().prepare('SELECT * FROM plan_docs WHERE id = ?').get(id);
+    11	  return doc ? NextResponse.json({ doc }) : NextResponse.json({ error: '기획서를 찾지 못했어요.' }, { status: 404 });
+    12	}
+    13	
+    14	/** Save edited Markdown. The title follows the H1 (`# 가제 기획서`). */
+    15	export async function PATCH(req: Request, { params }: Ctx) {
+    16	  const { id } = await params;
+    17	  const b = (await req.json().catch(() => null)) as { markdown?: unknown } | null;
+    18	  if (typeof b?.markdown !== 'string' || b.markdown.length > 200_000) return NextResponse.json({ error: '마크다운은 200,000자 이내여야 해요.' }, { status: 400 });
+    19	  const d = store();
+    20	  const title = (b.markdown.match(/^#\s+(.+)$/m)?.[1] ?? '제목 없는 기획서').replace(/\s*기획서\s*$/, '').trim().slice(0, 200) || '제목 없는 기획서';
+    21	  const r = d.prepare('UPDATE plan_docs SET markdown = ?, title = ? WHERE id = ?').run(b.markdown, title, id);
+    22	  if (!r.changes) return NextResponse.json({ error: '기획서를 찾지 못했어요.' }, { status: 404 });
+    23	  return NextResponse.json({ doc: d.prepare('SELECT * FROM plan_docs WHERE id = ?').get(id) });
+    24	}
+=== app/api/images/[id]/route.ts
+     1	import fs from 'node:fs/promises';
+     2	import path from 'node:path';
+     3	import { sniffImage } from '@/lib/images';
+     4	import { UPLOAD_DIR } from '@/lib/schema';
+     5	
+     6	export const runtime = 'nodejs';
+     7	
+     8	export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+     9	  const { id } = await params;
+    10	  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) return new Response('잘못된 이미지 id', { status: 400 });
+    11	  const bytes = await fs.readFile(path.join(UPLOAD_DIR, id)).catch(() => null);
+    12	  if (!bytes) return new Response('이미지를 찾지 못했어요', { status: 404 });
+    13	  const type = sniffImage(bytes);
+    14	  if (!type) return new Response('지원하지 않는 형식', { status: 415 });
+    15	  return new Response(new Uint8Array(bytes), {
+    16	    headers: {
+    17	      'Content-Type': type,
+    18	      'Cache-Control': 'public, max-age=31536000, immutable',
+    19	      'X-Content-Type-Options': 'nosniff',
+    20	      'Content-Security-Policy': "default-src 'none'",
+    21	    },
+    22	  });
+    23	}
+=== app/api/inputs/[id]/route.ts
+     1	import fs from 'node:fs/promises';
+     2	import path from 'node:path';
+     3	import { NextResponse } from 'next/server';
+     4	import { store, UPLOAD_DIR, type InputRow } from '@/lib/schema';
+     5	
+     6	export const runtime = 'nodejs';
+     7	
+     8	type Ctx = { params: Promise<{ id: string }> };
+     9	const bad = (error: string, status = 400) => NextResponse.json({ error }, { status });
+    10	
+    11	export async function PATCH(req: Request, { params }: Ctx) {
+    12	  const { id } = await params;
+    13	  const d = store();
+    14	  const row = d.prepare('SELECT * FROM plan_inputs WHERE id = ?').get(id) as InputRow | undefined;
+    15	  if (!row) return bad('항목을 찾지 못했어요.', 404);
+    16	  const b = (await req.json().catch(() => null)) as { title?: unknown; body?: unknown } | null;
+    17	  const title = typeof b?.title === 'string' ? b.title.trim() : '';
+    18	  if (!title || title.length > 200) return bad('제목을 200자 이내로 적어 주세요.');
+    19	  if (row.kind === 'decision') {
+    20	    if (typeof b?.body !== 'string' || b.body.length > 20000) return bad('본문은 20,000자 이내로 적어 주세요.');
+    21	    d.prepare('UPDATE plan_inputs SET title = ?, body = ? WHERE id = ?').run(title, b.body, id);
+    22	  } else d.prepare('UPDATE plan_inputs SET title = ? WHERE id = ?').run(title, id);
+    23	  return NextResponse.json({ input: d.prepare('SELECT * FROM plan_inputs WHERE id = ?').get(id) });
+    24	}
+    25	
+    26	export async function DELETE(_req: Request, { params }: Ctx) {
+    27	  const { id } = await params;
+    28	  const d = store();
+    29	  const row = d.prepare('SELECT * FROM plan_inputs WHERE id = ?').get(id) as InputRow | undefined;
+    30	  if (!row) return bad('항목을 찾지 못했어요.', 404);
+    31	  d.prepare('DELETE FROM plan_inputs WHERE id = ?').run(id);
+    32	  // uploaded files are named by their uuid row id; the regex keeps the path inside UPLOAD_DIR
+    33	  if (row.source === 'upload' && /^[0-9a-f-]{36}$/.test(id)) await fs.rm(path.join(UPLOAD_DIR, id), { force: true });
+    34	  return NextResponse.json({ ok: true });
+    35	}

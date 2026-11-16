@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500" role="img" aria-labelledby="t">
+  <title id="t">지하 정원 지도 시안: 방 조각을 이어 붙인 하루치 던전</title>
+  <rect width="800" height="500" fill="#1F2A33"/>
+  <g fill="none" stroke="#8FB9A8" stroke-width="10" stroke-linecap="round">
+    <path d="M140 250 H 300 M300 250 V 130 H 470 M300 250 V 370 H 470 M470 130 H 640 M470 370 H 640 V 250"/>
+  </g>
+  <g font-family="sans-serif" font-size="20" text-anchor="middle">
+    <rect x="80" y="200" width="120" height="100" rx="14" fill="#F4E3B2"/><text x="140" y="257" fill="#2B2B2B">입구</text>
+    <rect x="240" y="80" width="120" height="100" rx="14" fill="#A7D49B"/><text x="300" y="137" fill="#2B2B2B">수집방</text>
+    <rect x="240" y="320" width="120" height="100" rx="14" fill="#A7D49B"/><text x="300" y="377" fill="#2B2B2B">수집방</text>
+    <rect x="410" y="80" width="120" height="100" rx="14" fill="#BFD7EA"/><text x="470" y="137" fill="#2B2B2B">쉼터</text>
+    <rect x="410" y="320" width="120" height="100" rx="14" fill="#A7D49B"/><text x="470" y="377" fill="#2B2B2B">수집방</text>
+    <rect x="580" y="80" width="120" height="100" rx="14" fill="#A7D49B"/><text x="640" y="137" fill="#2B2B2B">수집방</text>
+    <rect x="580" y="200" width="120" height="100" rx="14" fill="#E3B5D8" stroke="#FFF3B0" stroke-width="4" stroke-dasharray="8 6"/><text x="640" y="257" fill="#2B2B2B">비밀방</text>
+  </g>
+</svg>
