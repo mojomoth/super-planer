@@ -13,6 +13,7 @@ import {
   FileText,
   Folder,
   Gamepad2,
+  GitFork,
   House,
   Image as ImageIcon,
   Layers,
@@ -32,7 +33,6 @@ import {
   Sprout,
   Undo2,
   Upload,
-  Workflow,
   type LucideIcon,
 } from "lucide-react";
 import { Logo } from "@/components/logo";
@@ -54,7 +54,7 @@ const MENU = [
 
 const TABS = [
   { name: "아이디어", icon: Lightbulb, href: "/" },
-  { name: "워크플로우", icon: Workflow, href: "/workflow", active: true },
+  { name: "워크플로우", icon: GitFork, iconClass: "rotate-180", href: "/workflow", active: true },
   { name: "질문과 답변", icon: BookOpen, href: "/questions" },
   { name: "기획서", icon: FileText, href: "/document" },
 ];
@@ -174,7 +174,7 @@ function TabBar() {
               t.active ? "font-semibold text-[#4F46E5]" : "text-[#444857] hover:text-[#111322]",
             )}
           >
-            <t.icon className="size-[22px]" strokeWidth={1.75} />
+            <t.icon className={cn("size-[22px]", t.iconClass)} strokeWidth={1.75} />
             {t.name}
             {t.active && <span className="absolute inset-x-0 bottom-0 h-[3px] bg-[#4F46E5]" />}
           </Link>

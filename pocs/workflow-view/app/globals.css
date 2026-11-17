@@ -10,8 +10,7 @@
   padding: var(--space-sm) var(--gutter); background: var(--color-paper); border-bottom: var(--rule-hair) solid var(--color-rule);
 }
 .wf-toolbar__title { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; }
-.wf-toolbar h1 { overflow: hidden; font-size: var(--text-lg); text-overflow: ellipsis; white-space: nowrap; }
-.wf-select { width: auto; max-width: 16rem; height: var(--control-h-sm); font-size: var(--text-sm); }
+.wf-select { width: auto; max-width: 20rem; font-weight: 600; }
 .wf-toolbar__actions { margin-left: auto; }
 .wf-toolbar__hint { flex-basis: 100%; text-align: right; }
 .wf-notices { display: grid; gap: var(--space-xs); padding: var(--space-xs) var(--gutter); background: var(--color-paper); border-bottom: var(--rule-hair) solid var(--color-rule); }
@@ -62,6 +61,9 @@
 .react-flow__edge.edge--cancelled .react-flow__edge-path { stroke-dasharray: 6 5; }
 .react-flow__edge.selected .react-flow__edge-path, .react-flow__edge:focus-visible .react-flow__edge-path { stroke: var(--color-accent); stroke-width: 3; }
 .react-flow__edge:focus-visible { outline: none; }
+/* draw-in once (DrawnEdge): the white mask stroke grows from the source; tokens.css's reduced-motion rule makes it instant */
+.edge-draw { fill: none; stroke: white; stroke-width: 24; stroke-dasharray: 1 1; animation: edge-draw var(--dur-long) var(--ease-out); }
+@keyframes edge-draw { from { stroke-dashoffset: 1; } }
 
 /* ports: 10px squares at the vertical centre of each side, a wider invisible hit area */
 .react-flow__handle { width: 10px; height: 10px; border-radius: var(--radius-mark); border: var(--rule-hair) solid var(--color-rule-2); background: var(--color-surface); }
@@ -80,7 +82,8 @@
 .react-flow__node.selected .node[data-status="frozen"] { box-shadow: 0 0 0 3px var(--color-frozen-wash), var(--shadow-raised); }
 .node[data-status="cancelled"] { border-style: dashed; border-color: var(--color-rule-2); background: var(--color-paper-2); }
 .node[data-status="cancelled"] .node__title { color: var(--color-muted); text-decoration: line-through; text-decoration-color: var(--color-muted); }
-.node[data-status="cancelled"] .node__head > :not(.node__bar), .node[data-status="cancelled"] .node__body { opacity: 0.72; }
+/* muted, not opacity: muted on paper-2 / accent-wash stays above 5:1, opacity 0.72 dropped it to 3:1 */
+.node[data-status="cancelled"] .msg__body, .node[data-status="cancelled"] .preview__title { color: var(--color-muted); }
 
 .node__head { display: grid; gap: var(--space-2xs); padding: var(--space-sm) var(--space-md); }
 .node__bar { display: flex; align-items: center; gap: var(--space-xs); min-height: var(--control-h-sm); }
@@ -95,7 +98,8 @@
 
 .node__body { display: grid; gap: var(--space-sm); padding: var(--space-sm) var(--space-md) var(--space-md); border-top: var(--rule-hair) solid var(--color-rule); cursor: auto; animation: node-in var(--dur-short) var(--ease-out); }
 @keyframes node-in { from { opacity: 0; } }
-.node__verdict { background: var(--color-frozen-wash); }
+/* anywhere, not break-word: a link-only decision's min-content would otherwise widen the body grid past the card */
+.node__verdict { background: var(--color-frozen-wash); overflow-wrap: anywhere; }
 .node__verdict svg { color: var(--color-frozen); }
 .node__verdict-label { color: var(--color-frozen); font-weight: 600; }
 .node__chat { max-height: 360px; overflow-y: auto; overscroll-behavior: contain; padding-right: var(--space-2xs); cursor: text; }
@@ -104,6 +108,8 @@
 
 .msg__time { margin-left: var(--space-2xs); color: var(--color-muted); font-size: var(--text-xs); font-weight: 400; }
 .msg--user .msg__time { margin-left: 0; }
+/* .msg--user aligns items to the end; the gallery (inline-size container) would shrink to nothing */
+.msg--user .gallery { justify-self: stretch; }
 .msg__body ul, .msg__body ol { padding-left: var(--space-md); }
 .msg__body li + li { margin-top: var(--space-3xs); }
 .msg__body strong { font-weight: 600; }

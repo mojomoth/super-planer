@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { NextResponse } from 'next/server';
+import { BASE } from '@/lib/base';
 import { isHttpsUrl, MAX_UPLOAD, sniffImage } from '@/lib/images';
 import { listInputs, now, store, UPLOAD_DIR } from '@/lib/schema';
 
@@ -34,7 +35,7 @@ export async function POST(req: Request) {
     const id = randomUUID();
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
     await fs.writeFile(path.join(UPLOAD_DIR, id), bytes);
-    insert.run(id, 'image', caption, null, `/api/images/${id}`, 'upload', now());
+    insert.run(id, 'image', caption, null, `${BASE}/api/images/${id}`, 'upload', now());
     return NextResponse.json({ input: d.prepare('SELECT * FROM plan_inputs WHERE id = ?').get(id) }, { status: 201 });
   }
 

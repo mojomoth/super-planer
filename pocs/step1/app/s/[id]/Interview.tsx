@@ -38,7 +38,7 @@ export default function Interview({ initial }: { initial: State }) {
     send('back');
   }
 
-  if (state.status === 'done' && state.result) return <Result state={state} />;
+  if (state.status === 'done' && state.result) return <Result state={state} focus={moved} />;
 
   const answered = state.turns.filter((t) => t.answer || (pending && t.id === state.open?.id)).map((t) => (t.answer ? t : { ...t, answer: pending }));
   const waiting = busy === 'answer' || busy === 'more';
@@ -50,7 +50,7 @@ export default function Interview({ initial }: { initial: State }) {
         <div className="page-head">
           <div className="page-head__text">
             <h1 className="prompt-title">{state.prompt}</h1>
-            <p className="page-head__desc">질문에 답할수록 오른쪽의 애매한 부분이 줄어들어요. 최대 {state.maxQuestions}개까지 물어봐요.</p>
+            <p className="page-head__desc">질문에 답할수록 애매한 부분 점수가 줄어들어요. 최대 {state.maxQuestions}개까지 물어봐요.</p>
           </div>
         </div>
 
@@ -67,7 +67,9 @@ export default function Interview({ initial }: { initial: State }) {
                     key={state.open.id} turn={state.open} max={state.maxQuestions} enter={moved} busy={busy} error={error}
                     onAnswer={(a) => { setPending(a); send('answer', { turnId: state.open!.id, ...a }); }}
                     initialAnswer={restore?.id === state.open.id ? restore.answer : null}
-                    onBack={back} onWrap={() => send('wrap')}
+                    onBack={back}
+                    // Keep a picked/typed answer: busy shows the wrap state, the body saves it as an answer without asking the next question.
+                    onWrap={(a) => send('wrap', a.choices.length || a.text ? { action: 'answer', turnId: state.open!.id, ...a, wrap: true } : {})}
                   />
                 </div>
               ) : waiting ? null : state.restate ? (
@@ -125,7 +127,7 @@ function ErrorNotice({ error }: { error: string }) {
 
 function QuestionCard({ turn, max, enter, busy, error, initialAnswer, onAnswer, onBack, onWrap }: {
   turn: TurnView; max: number; enter: boolean; busy: Busy; error: string; initialAnswer: Answer | null;
-  onAnswer: (a: Answer) => void; onBack: () => void; onWrap: () => void;
+  onAnswer: (a: Answer) => void; onBack: () => void; onWrap: (a: Answer) => void;
 }) {
   const [choices, setChoices] = useState<string[]>(() => (initialAnswer?.recommended ? [RECOMMEND] : initialAnswer?.choices ?? []));
   const [text, setText] = useState(initialAnswer?.text ?? '');
@@ -165,7 +167,7 @@ function QuestionCard({ turn, max, enter, busy, error, initialAnswer, onAnswer, 
     <section className={`panel qcard${enter ? ' qcard--enter' : ''}`} aria-labelledby={`q-${turn.id}`}>
       <form onSubmit={submit} onKeyDown={keys} noValidate>
         <div className="panel__body qcard__body">
-          <p className="meta num">질문 {turn.idx + 1} / {max}<span className="flow__track">{turn.trackLabel}</span></p>
+          <p className="meta num">질문 {turn.idx + 1}{turn.idx < max && ` / ${max}`}<span className="flow__track">{turn.trackLabel}</span></p>
           <h2 className="qcard__q" id={`q-${turn.id}`} ref={heading} tabIndex={-1}>{turn.question}</h2>
           {turn.hint && <p className="qcard__hint">{turn.hint}</p>}
           <fieldset className="choices choices--stack" disabled={locked} aria-describedby={empty ? `e-${turn.id}` : undefined}>
@@ -193,13 +195,13 @@ function QuestionCard({ turn, max, enter, busy, error, initialAnswer, onAnswer, 
             </div>
           )}
           {empty && <p className="field__error" id={`e-${turn.id}`}>보기를 고르거나 직접 써 주세요.</p>}
-          {fallback && <p className="meta">{turn.provider}로 만든 질문이에요.</p>}
+          {fallback && <p className="meta">질문을 만든 모델: {turn.provider}</p>}
           <ErrorNotice error={error} />
         </div>
         <footer className="panel__foot btn-row">
           <button type="submit" className="btn btn--primary" disabled={locked} aria-busy={busy === 'answer'}>다음 질문</button>
           {turn.idx > 0 && <button type="button" className="btn btn--ghost" onClick={onBack} disabled={locked} aria-busy={busy === 'back'}><Undo />이전</button>}
-          {turn.idx > 0 && <button type="button" className="btn btn--ghost qcard__wrap" onClick={onWrap} disabled={locked} aria-busy={busy === 'wrap'}>여기까지로 정리하기</button>}
+          {turn.idx > 0 && <button type="button" className="btn btn--ghost qcard__wrap" onClick={() => onWrap({ choices, text: text.trim() })} disabled={locked} aria-busy={busy === 'wrap'}>여기까지로 정리하기</button>}
         </footer>
       </form>
     </section>
@@ -260,17 +262,19 @@ function Ledger({ state, current }: { state: State; current: string | null }) {
   );
 }
 
-function Result({ state }: { state: State }) {
+function Result({ state, focus }: { state: State; focus: boolean }) {
   const r = state.result!;
   const c = r.concept;
+  const h = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { if (focus) h.current?.focus({ preventScroll: true }); }, [focus]); // the clicked button is gone: land on the title
   return (
     <div className="layout">
       <div className="layout__main result">
         <div className="result__head">
-          <h1 className="result__title">{r.title}<span className="result__tag">가제</span></h1>
+          <h1 className="result__title" ref={h} tabIndex={-1}>{r.title}<span className="result__tag">가제</span></h1>
           <p className="result__one">{r.one_liner}</p>
           <div className="btn-row">
-            <a className="btn btn--primary" href={`http://localhost:3102/?from=step1:${state.id}`}>워크플로우로 열기</a>
+            <a className="btn btn--primary" href={`/workflow?from=step1:${state.id}`}>워크플로우로 열기</a>
             <a className="btn" href="/">새로 시작</a>
           </div>
         </div>

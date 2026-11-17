@@ -22,21 +22,29 @@ export function isHttpsUrl(s: string): boolean {
 }
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+// Own images on this origin are root-relative under an app's basePath; API-served ones have no extension.
+const OWN = /^\/(?:workflow|plan)\//;
+const OWN_IMAGE_API = /^\/(?:workflow|plan)\/api\/images\/[\w-]+$/;
 
-/** http(s) image URLs in free text: path ends in an image extension, or any picsum.photos link.
- * http is kept (workflow-view links its own http://localhost samples); the server never fetches these, the browser loads them as <img>. */
+/** Image URLs in free text, the same rule as workflow-view's isImageUrl: path ends in an image extension,
+ * or a root-relative own path (/workflow/…, /plan/…) starting a word that ends in one or is an /api/images/<id>.
+ * http is kept; the server never fetches these, the browser loads them as <img>. */
 export function extractImageUrls(text: string): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(/https?:\/\/[^\s<>()"'`[\]]+/g)) {
+  for (const m of text.matchAll(/https?:\/\/[^\s<>()"'`[\]]+|(?<![^\s(<[])\/(?:workflow|plan)\/[^\s<>()"'`[\]]*/g)) {
     const raw = m[0].replace(/[.,;:!?。、]+$/, '');
     let u: URL;
     try {
-      u = new URL(raw);
+      u = new URL(raw, 'http://own.invalid');
     } catch {
       continue;
     }
+    if (raw.startsWith('/')) {
+      if (OWN.test(u.pathname) && (IMAGE_EXT.test(u.pathname) || OWN_IMAGE_API.test(u.pathname))) out.push(u.pathname + u.search);
+      continue;
+    }
     if (!/^https?:$/.test(u.protocol) || !u.hostname || u.username || u.password) continue;
-    if (IMAGE_EXT.test(u.pathname) || u.hostname === 'picsum.photos' || u.hostname.endsWith('.picsum.photos')) out.push(u.href);
+    if (IMAGE_EXT.test(u.pathname)) out.push(u.href);
   }
   return [...new Set(out)];
 }

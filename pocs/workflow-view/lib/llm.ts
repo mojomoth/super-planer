@@ -23,14 +23,22 @@ function extractJSON(text: string): unknown {
 }
 
 async function viaAnthropic(system: string, user: string): Promise<string> {
-  const client = new Anthropic();
-  const res = await client.messages.create({
-    model: process.env.LLM_MODEL ?? 'claude-sonnet-5-5',
-    max_tokens: 4096,
+  // SDK defaults are 2 retries x 10 min, and a retried timeout can bill twice: one retry, 5 min each (JSON answers take well under that)
+  const client = new Anthropic({ maxRetries: 1, timeout: 300_000 });
+  const res = await client.beta.messages.create({
+    model: process.env.LLM_MODEL || 'claude-opus-5-5',
+    max_tokens: 16000, // adaptive thinking counts toward this too
+    // server-side refusal fallback: a policy decline is re-run on the model's default fallback inside the same call
+    betas: ['server-side-fallback-2026-07-01'],
+    fallbacks: 'default',
     system,
     messages: [{ role: 'user', content: user }],
   });
-  return res.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
+  // the whole fallback chain declined, or nothing usable came back: throw so completeJSON uses the mock answer
+  if (res.stop_reason === 'refusal') throw new Error(`refused (${res.stop_details?.category ?? 'no category'})`);
+  const text = res.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
+  if (!text.trim()) throw new Error(`no text (stop_reason ${res.stop_reason})`);
+  return text;
 }
 
 function viaClaudeCli(system: string, user: string): Promise<string> {

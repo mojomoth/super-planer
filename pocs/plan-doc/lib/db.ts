@@ -4,6 +4,8 @@ import path from 'node:path';
 
 // One SQLite file shared by all three PoCs (pocs/.data/super-planer.db) so step1 → workflow-view → plan-doc can hand data over.
 const file = process.env.SUPER_PLANER_DB ?? path.join(process.cwd(), '..', '.data', 'super-planer.db');
+/** Uploaded and generated image files sit next to the DB file, so SUPER_PLANER_DB=/tmp/x.db isolates them too. */
+export const UPLOAD_DIR = path.join(path.dirname(file), 'uploads');
 const g = globalThis as unknown as { __spdb?: DatabaseSync };
 
 export function db(): DatabaseSync {

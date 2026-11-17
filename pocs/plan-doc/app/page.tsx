@@ -12,5 +12,6 @@ export default async function Page({ searchParams }: { searchParams: Promise<Rec
   const latest = docs[0] ? (store().prepare('SELECT * FROM plan_docs WHERE id = ?').get(docs[0].id) as DocRow) : null;
   // node:sqlite rows have a null prototype; structuredClone makes them plain objects a Client Component accepts.
   const props = structuredClone({ initialInputs: listInputs(), initialDocs: docs, initialDoc: latest ?? null, step1: listStep1(), workflowId: wf });
-  return <PlanDoc {...props} />;
+  // Only whether a key exists reaches the client, never the key itself.
+  return <PlanDoc {...props} hasOpenAIKey={!!process.env.OPENAI_API_KEY?.trim()} />;
 }

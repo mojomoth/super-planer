@@ -2,6 +2,9 @@
 
 /* plan-doc: only what DESIGN.md does not cover, tokens only. */
 
+/* keyboard focus never lands under the sticky header (top) or the sticky .plan-go bar (bottom, about 95px) */
+html { scroll-padding-block: calc(var(--header-h) + var(--space-xs)) 7rem; }
+
 .plan-notice { margin-bottom: var(--space-md); }
 
 .plan-layout { display: grid; gap: var(--space-lg); align-items: start; }
@@ -13,6 +16,8 @@
 .panel__heading { display: grid; gap: 0; min-width: 0; }
 .panel__heading .panel__title { white-space: nowrap; }
 .panel__heading .meta { font-size: var(--text-xs); white-space: nowrap; }
+/* the 360px input column: the image panel's three actions drop under its heading instead of covering it */
+.plan-inputs .panel__head { flex-wrap: wrap; }
 
 /* decision picker rows: hairlines between, no boxes */
 .pick-list { display: grid; margin: 0; padding: 0; list-style: none; }
@@ -96,3 +101,7 @@
 .md-doc figure img { width: auto; max-width: 100%; }
 .md-table { overflow-x: auto; }
 .md-doc h1 { overflow-wrap: break-word; min-width: 0; }
+/* phones only: keep the label column (결정 로그 항목) at 7em of text plus padding (border-box), so short labels stay on one line */
+@media (max-width: 40rem) {
+  .md-doc td:first-child { min-width: calc(7em + 2 * var(--space-sm)); }
+}

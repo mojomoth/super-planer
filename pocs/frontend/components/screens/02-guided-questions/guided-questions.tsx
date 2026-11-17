@@ -53,16 +53,16 @@ export function GuidedQuestions() {
         </Avatar>
       </header>
 
-      <main className="flex flex-col items-center pt-[25px]">
+      <main className="flex flex-col items-center px-4 pt-[25px]">
         <Logo size={57} />
 
-        <div className="mt-[28px] flex h-[59px] w-[565px] items-center rounded-[10px] border border-[#E0E2EA] bg-[#F3F4F8] pl-7 shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
-          <Mail className="size-7 text-[#27272A]" strokeWidth={1.75} />
+        <div className="mt-[28px] flex min-h-[59px] w-full max-w-[565px] items-center rounded-[10px] border border-[#E0E2EA] bg-[#F3F4F8] py-2 pr-4 pl-7 shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
+          <Mail className="size-7 shrink-0 text-[#27272A]" strokeWidth={1.75} />
           <span className="mx-6 h-7 w-px bg-[#D4D6DE]" />
           <span className="text-[24px] font-semibold text-[#1F2230]">작은 숲속 마을에서 편지를 배달하는 힐링 게임</span>
         </div>
 
-        <Card className="mt-[22px] w-[907px] gap-0 rounded-[12px] border border-[#E4E4E7] p-6 shadow-[0_1px_2px_rgba(16,24,40,0.04)] ring-0">
+        <Card className="mt-[22px] w-full max-w-[907px] gap-0 rounded-[12px] border border-[#E4E4E7] p-6 shadow-[0_1px_2px_rgba(16,24,40,0.04)] ring-0">
           <div className="flex h-[31px] items-center justify-between">
             <span className="pl-[3px] text-[21px] font-bold">질문 2 / 5</span>
             <Badge className="h-[31px] gap-2.5 rounded-[7px] bg-[#ECEBFD] px-3.5 text-[16px] font-medium text-[#3B3A66] [&>svg]:size-[22px]!">
@@ -85,7 +85,7 @@ export function GuidedQuestions() {
                 <label
                   key={value}
                   className={cn(
-                    "flex h-20 cursor-pointer items-center rounded-[10px] border pr-[18px]",
+                    "flex min-h-20 cursor-pointer items-center rounded-[10px] border py-3 pr-[18px]",
                     checked
                       ? "border-2 border-[#4F46E5] bg-[#EFEEFD]"
                       : "border-[#E0E2E7] bg-white hover:border-[#C7C9D1] hover:bg-[#FAFAFC]",

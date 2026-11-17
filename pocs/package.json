@@ -2,8 +2,10 @@
   "name": "super-planer-pocs",
   "private": true,
   "workspaces": ["step1", "workflow-view", "plan-doc"],
+  "engines": { "node": ">=24 <25" },
   "scripts": {
-    "dev": "node dev.mjs",
-    "build": "npm run build --workspaces"
+    "dev": "node serve.mjs dev",
+    "build": "npm run build --workspaces",
+    "start": "node serve.mjs"
   }
 }

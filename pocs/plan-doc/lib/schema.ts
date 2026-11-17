@@ -1,8 +1,8 @@
-import path from 'node:path';
+import { BASE } from './base';
 import { db } from './db';
 
 // plan-doc owns only plan_inputs and plan_docs (see pocs/CONTRACT.md).
-export const UPLOAD_DIR = path.join(process.cwd(), '..', '.data', 'uploads');
+export { UPLOAD_DIR } from './db';
 
 export type InputRow = { id: string; kind: 'decision' | 'image'; title: string; body: string | null; url: string | null; source: string | null; created_at: string };
 export type DocRow = { id: string; title: string; markdown: string; provider: string | null; created_at: string };
@@ -15,6 +15,11 @@ export function store() {
     d.exec(`
       CREATE TABLE IF NOT EXISTS plan_inputs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT, url TEXT, source TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS plan_docs (id TEXT PRIMARY KEY, title TEXT NOT NULL, markdown TEXT NOT NULL, provider TEXT, created_at TEXT NOT NULL);
+      -- Rows from before the one-origin setup: own images were /samples/… and /api/images/…, workflow-view's http://localhost:3102/…
+      UPDATE plan_inputs SET url = '/plan' || url WHERE url LIKE '/samples/%' OR url LIKE '/api/images/%';
+      UPDATE plan_inputs SET url = '/workflow/' || substr(url, 23) WHERE url LIKE 'http://localhost:3102/%';
+      UPDATE plan_docs SET markdown = replace(replace(replace(markdown, '](/samples/', '](/plan/samples/'), '](/api/images/', '](/plan/api/images/'), '](http://localhost:3102/', '](/workflow/')
+        WHERE instr(markdown, '](/samples/') OR instr(markdown, '](/api/images/') OR instr(markdown, '](http://localhost:3102/');
     `);
     const { n } = d.prepare('SELECT COUNT(*) AS n FROM plan_inputs').get() as { n: number };
     g.__planDocInit = true;
@@ -84,17 +89,17 @@ const SEED_DECISIONS: [string, string][] = [
 ];
 
 const SEED_IMAGES: [string, string][] = [
-  ['캐릭터 콘셉트: 등불을 든 고슴도치 요리사', '/samples/character.svg'],
-  ['레벨 콘셉트: 등불이 닿는 버섯굴 방', '/samples/level.svg'],
-  ['UI 시안: 수프 레시피 3칸 조합 화면', '/samples/ui.svg'],
-  ['분위기: 새벽의 수프 가게', '/samples/mood.svg'],
+  ['캐릭터 콘셉트: 등불을 든 고슴도치 요리사', `${BASE}/samples/character.svg`],
+  ['레벨 콘셉트: 등불이 닿는 버섯굴 방', `${BASE}/samples/level.svg`],
+  ['UI 시안: 수프 레시피 3칸 조합 화면', `${BASE}/samples/ui.svg`],
+  ['분위기: 새벽의 수프 가게', `${BASE}/samples/mood.svg`],
 ];
 
-/** Insert the sample game inputs. Fixed ids, so running it twice changes nothing. */
-export function seed() {
+/** Insert the sample game inputs (all, or one kind). Fixed ids, so running it twice changes nothing. */
+export function seed(kind?: InputRow['kind']) {
   const d = db();
   const ins = d.prepare('INSERT OR IGNORE INTO plan_inputs (id, kind, title, body, url, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
   const t = Date.now();
-  SEED_DECISIONS.forEach(([title, body], i) => ins.run(`seed-d${i + 1}`, 'decision', title, body, null, 'seed', new Date(t + i).toISOString()));
-  SEED_IMAGES.forEach(([title, url], i) => ins.run(`seed-i${i + 1}`, 'image', title, null, url, 'seed', new Date(t + 10 + i).toISOString()));
+  if (kind !== 'image') SEED_DECISIONS.forEach(([title, body], i) => ins.run(`seed-d${i + 1}`, 'decision', title, body, null, 'seed', new Date(t + i).toISOString()));
+  if (kind !== 'decision') SEED_IMAGES.forEach(([title, url], i) => ins.run(`seed-i${i + 1}`, 'image', title, null, url, 'seed', new Date(t + 10 + i).toISOString()));
 }

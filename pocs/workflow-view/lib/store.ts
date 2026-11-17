@@ -179,7 +179,8 @@ export function importStep1(sessionId: string): { id: string } | { error: string
     const wid = insertWorkflow(gameTitle, source);
     const PER_ROW = 4;
     const pos = (i: number) => ({ x: (i % PER_ROW) * 360, y: Math.floor(i / PER_ROW) * 280 });
-    const t0 = Date.now();
+    // stamps end in the past: a future stamp would sort the imported Q/A after messages sent right after import
+    const t0 = Date.now() - (turns.length + 1) * 1000;
     const at = (i: number, k: number) => new Date(t0 + i * 1000 + k).toISOString();
 
     const conceptCard = insertCard({

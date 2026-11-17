@@ -2,6 +2,7 @@
 import { completeJSON, type Provider } from './llm';
 import { isHttpUrl, extractUrls } from './urls';
 import { condense, parseBlocks } from './md';
+import { generateImage, IMAGE_PROMPT_MAX } from './imagegen';
 import type { Card, Message } from './store';
 
 type Topic = { tips: string[]; page: string };
@@ -56,29 +57,23 @@ const DEFAULT_TOPIC: Topic = { page: 'https://en.wikipedia.org/wiki/Roguelike', 
   '비슷한 게임에서 좋았던 장면 하나를 골라 이유를 적어 봐요.',
   '플레이어가 이 부분에서 무엇을 느끼면 좋을지 한 단어로 정해요.',
 ] };
-const PICSUM = [10, 15, 28, 40, 106, 152, 180, 237, 292, 433, 1015, 1043];
 
-function hash(s: string) {
-  let h = 0;
-  for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return h;
-}
-
-/** Deterministic reply used for LLM_PROVIDER=mock and whenever the model fails. Always carries reference URLs. */
-export function fallbackReply(card: Pick<Card, 'title' | 'description'>, userText: string, turn: number): string {
+/** Deterministic reply used for LLM_PROVIDER=mock and whenever the model fails: text, a reference page and a picture brief. */
+export function fallbackReply(card: Pick<Card, 'title' | 'description'>, userText: string, turn: number) {
   const topic = TOPICS.find(([re]) => re.test(`${card.title} ${card.description}`))?.[1] ?? DEFAULT_TOPIC;
   const tips = [0, 1, 2].map((k) => topic.tips[(turn + k) % topic.tips.length]);
-  const quote = userText.length > 40 ? `${userText.slice(0, 39)}…` : userText;
-  const img = PICSUM[hash(`${card.title}${userText}`) % PICSUM.length];
-  return `**${card.title}** 기준으로 "${quote}"에 맞춰 정리해 봤어요.
+  // condense drops URLs first, so the cut never leaves a broken link for the gallery to preview;
+  // it also drops label lines ("참고", "…:"), so an empty quote does not mean the user sent only a link
+  const quote = condense(userText, 40) || '보내 준 내용';
+  const reply = `**${card.title}** 기준으로 "${quote}"에 맞춰 정리해 봤어요.
 
 ${[...new Set(tips)].map((t) => `- ${t}`).join('\n')}
 
-마음에 드는 쪽을 골라 주면 그 방향으로 더 좁혀 볼게요.
-
-참고:
-- https://picsum.photos/id/${img}/800/500
-- ${topic.page}`;
+마음에 드는 쪽을 골라 주면 그 방향으로 더 좁혀 볼게요.`;
+  // an imported step1 card's description is its question, which is no scene to draw
+  const about = card.description.trim().endsWith('?') ? '' : card.description;
+  const imagePrompt = [card.title, about, condense(userText, 300)].map((s) => s.trim()).filter(Boolean).join(' / ');
+  return { reply, references: [topic.page], imagePrompt };
 }
 
 /** The agent's next message for a card, given the stored history (which already ends with the user's message). */
@@ -89,37 +84,54 @@ export async function agentReply(
 ): Promise<{ content: string; provider: Provider; error?: string }> {
   const userText = history.at(-1)?.content ?? '';
   const turn = history.filter((m) => m.role === 'user').length;
-  const fallback = () => ({ reply: fallbackReply(card, userText, turn), references: [] as string[] });
+  const fallback = () => fallbackReply(card, userText, turn);
   const system = `너는 게임 기획 팀의 하위 에이전트다. 게임 "${workflowTitle}"의 "${card.title}" 카드를 맡았다 (${card.description}).
 15~20세도 바로 이해할 쉬운 한국어로, 구체적인 제안 2~4개를 짧게 답한다. 과장된 표현과 지어낸 수치는 쓰지 않는다.
-참고 URL을 1~4개 고른다: 이미지는 https://picsum.photos/id/<0~1000>/800/500 형식, 페이지는 실제로 있는 위키백과나 공식 문서 주소만.
-JSON만 출력한다: {"reply": "마크다운(문단, - 목록, **굵게**) 답변. URL은 넣지 않는다", "references": ["https://..."]}`;
+참고 URL을 1~3개 고른다: 실제로 있는 위키백과나 공식 문서 페이지 주소만. 이미지 주소는 넣지 않는다.
+예시 그림 한 장이 제안을 이해하는 데 도움이 되면 imagePrompt에 그릴 장면을 한두 문장으로 묘사한다(글자, 로고, 실존 인물 없이). 필요 없으면 빈 문자열.
+JSON만 출력한다: {"reply": "마크다운(문단, - 목록, **굵게**) 답변. URL은 넣지 않는다", "references": ["https://..."], "imagePrompt": "..."}`;
   const transcript = history.slice(-12).map((m) => `${m.role === 'user' ? '사용자' : '에이전트'}: ${m.content}`).join('\n\n');
-  const r = await completeJSON<{ reply?: unknown; references?: unknown }>(system, transcript, fallback);
+  const r = await completeJSON<{ reply?: unknown; references?: unknown; imagePrompt?: unknown }>(system, transcript, fallback);
 
-  const reply = typeof r.data?.reply === 'string' ? r.data.reply.trim().slice(0, 4000) : '';
-  if (!reply) return { content: fallback().reply, provider: 'mock', error: r.error ?? 'model returned no reply' };
-  const refs = (Array.isArray(r.data.references) ? r.data.references : [])
+  let data = r.data;
+  let meta = { provider: r.provider, error: r.error };
+  if (typeof data?.reply !== 'string' || !data.reply.trim()) {
+    data = fallback();
+    meta = { provider: 'mock', error: r.error ?? 'model returned no reply' };
+  }
+  const reply = String(data.reply).trim().slice(0, 4000);
+  const refs = (Array.isArray(data.references) ? data.references : [])
     .filter((u): u is string => typeof u === 'string' && u.length <= 500 && isHttpUrl(u) && !extractUrls(reply).includes(u))
     .slice(0, 4);
-  const content = refs.length ? `${reply}\n\n참고:\n${refs.map((u) => `- ${u}`).join('\n')}` : reply;
-  return { content, provider: r.provider, error: r.error };
+
+  // At most one image per answer; a failure (or no key) leaves an honest line instead, never a stand-in picture.
+  const brief = typeof data.imagePrompt === 'string' ? data.imagePrompt.trim().slice(0, 1000) : '';
+  const parts = [reply];
+  if (brief) {
+    const tail = `\n\n게임 "${workflowTitle}" 기획 회의에 붙일 예시 콘셉트 아트 한 장. 화면에 글자나 UI 없이 그림만.`;
+    const img = await generateImage((brief + tail).slice(0, IMAGE_PROMPT_MAX), card.id);
+    parts.push('url' in img ? `예시 이미지: ${img.url}` : `예시 이미지: ${condense(img.error, 300)}`);
+  }
+  if (refs.length) parts.push(`참고:\n${refs.map((u) => `- ${u}`).join('\n')}`);
+  return { content: parts.join('\n\n'), ...meta };
 }
 
-/** One to three sentences of what the chat settled on. Fallback: the last agent message, condensed. */
+/** One to three sentences of what the chat settled on. Fallback: the user's answer if they had the last word, else the last agent message, condensed. */
 export async function decisionFor(card: Card, history: Message[]): Promise<{ decision: string; provider: Provider; error?: string }> {
+  // only imported step1 cards end on the user (agent question, user answer): that answer is the decision, as on import
+  const last = history.at(-1);
   const lastAgent = [...history].reverse().find((m) => m.role === 'agent');
   // prefer the suggestions (list items) over the reply's framing sentences
   const gist = (text: string) => {
     const items = parseBlocks(text).flatMap((b) => (b.t === 'p' ? [] : b.items)).filter((i) => condense(i));
     return condense(items.length ? items.join('\n') : text);
   };
-  const fallback = () => ({ decision: (lastAgent && gist(lastAgent.content)) || card.description || card.title });
+  const fallback = () => ({ decision: (last?.role === 'user' && last.content.trim()) || (lastAgent && gist(lastAgent.content)) || card.description || card.title });
   if (!history.length) return { decision: fallback().decision, provider: 'mock' };
   const system = `게임 기획 카드 "${card.title}" (${card.description})의 대화를 읽고, 합의된 결정을 한국어 1~3문장으로 요약한다.
 결정이 분명하지 않으면 가장 최근 제안을 결정으로 적는다. URL과 지어낸 수치는 넣지 않는다. JSON만 출력한다: {"decision": "..."}`;
   const transcript = history.slice(-20).map((m) => `${m.role === 'user' ? '사용자' : '에이전트'}: ${m.content}`).join('\n\n');
   const r = await completeJSON<{ decision?: unknown }>(system, transcript, fallback);
   const decision = typeof r.data?.decision === 'string' ? r.data.decision.trim().slice(0, 800) : '';
-  return decision ? { decision, provider: r.provider, error: r.error } : { ...fallback(), provider: 'mock', error: r.error };
+  return decision ? { decision, provider: r.provider, error: r.error } : { ...fallback(), provider: 'mock', error: r.error ?? 'model returned no decision' };
 }

@@ -15,7 +15,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return new Response(new Uint8Array(bytes), {
     headers: {
       'Content-Type': type,
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      // private: the site sits behind Basic auth, so no shared cache may keep a copy
+      'Cache-Control': 'private, max-age=31536000, immutable',
       'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy': "default-src 'none'",
     },

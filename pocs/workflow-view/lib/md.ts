@@ -1,6 +1,6 @@
 // Tiny markdown-ish parser for chat messages: paragraphs, bullet/numbered lists, **bold**, [text](url), bare URLs.
 // Returns plain data; the React side renders it, so no HTML string is ever injected.
-import { trimUrl } from './urls.ts';
+import { OWN_PATH, URL_SRC, trimUrl } from './urls.ts';
 
 export type Inline =
   | { t: 'text'; v: string }
@@ -43,7 +43,7 @@ export function parseBlocks(text: string): Block[] {
   return blocks;
 }
 
-const INLINE_RE = /\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+,;=%()]+)/g;
+const INLINE_RE = new RegExp(String.raw`\*\*([^*]+)\*\*|\[([^\]]+)\]\(((?:https?:\/\/|${OWN_PATH})[^\s)]+)\)|(${URL_SRC})`, 'g');
 
 export function parseInline(line: string): Inline[] {
   const out: Inline[] = [];
@@ -66,12 +66,16 @@ export function parseInline(line: string): Inline[] {
   return out;
 }
 
+const LINK_MD_RE = new RegExp(String.raw`\[([^\]]+)\]\((?:https?:\/\/|${OWN_PATH})[^)]+\)`, 'g');
+// a "참고" right before a URL ("…주세요. 참고 https://…") goes with it, so no dangling label is left
+const BARE_URL_RE = new RegExp(String.raw`(?:(?<!\S)참고\s*:?\s*)?(?:https?:\/\/|${OWN_PATH})\S+`, 'g');
+
 /** Plain-text gist of a message: no URLs, markdown marks or "참고" lines, cut at a sentence end near `max`. */
 export function condense(text: string, max = 220): string {
   const flat = text
-    .replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/g, '$1')
+    .replace(LINK_MD_RE, '$1')
     .split('\n')
-    .map((l) => l.replace(/https?:\/\/\S+/g, '').replace(/\*\*/g, '').replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').trim())
+    .map((l) => l.replace(BARE_URL_RE, '').replace(/\*\*/g, '').replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').trim())
     .filter((l) => l && !/^(참고|분위기 참고|비슷한 구조)\s*:?$/.test(l) && !/:\s*$/.test(l))
     .join(' ')
     .replace(/\s+/g, ' ')

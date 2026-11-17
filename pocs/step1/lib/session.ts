@@ -4,7 +4,7 @@ import { completeJSON, provider } from './llm';
 import { ensureSchema } from './schema';
 import {
   HARD_CAP, MAX_QUESTIONS, RECOMMEND, TRACKS, CLEAR, QUESTION_SYSTEM, CONCEPT_SYSTEM,
-  applyAnswer, blockedTrack, conceptUser, decisions, goalLine, initialLedger, label, mockConcept, mockQuestion,
+  CORE, applyAnswer, blockedTrack, conceptUser, decisions, goalLine, initialLedger, label, mergeLedger, mockConcept, mockQuestion,
   overall, parseConcept, parseQuestion, pickTrack, questionUser, resolveAnswer, shouldStop,
   type Answer, type Ledger, type Question, type TrackKey, type Turn,
 } from './interview';
@@ -79,13 +79,13 @@ async function askNext(id: string, force = false): Promise<void> {
   const mock = () => ({ ...mockQuestion(x.s.prompt, turns, target), ambiguity: x.ledger, done: false });
   const res = await completeJSON(QUESTION_SYSTEM, questionUser(x.s.prompt, turns, x.ledger, target, blocked), mock);
   const parsed = parseQuestion(res.data, blocked);
-  const ledger = { ...x.ledger, ...parsed.ledger };
+  const ledger = mergeLedger(x.ledger, parsed.ledger, history);
   let q: Question;
   let used: string = res.provider;
   if (parsed.q) q = parsed.q;
-  else if (parsed.done && !force && res.provider !== 'mock') {
+  else if (parsed.done && !force && res.provider !== 'mock' && CORE.every((k) => history.includes(k))) {
     db().prepare('UPDATE step1_sessions SET tracks = ?, ambiguity = ? WHERE id = ?').run(JSON.stringify(ledger), overall(ledger), id);
-    return; // model says every track is clear: go to the Restate gate
+    return; // model says every track is clear (and each core track was asked): go to the Restate gate
   } else {
     const pick = pickTrack(ledger, history);
     q = mockQuestion(x.s.prompt, turns, pick);
@@ -132,10 +132,10 @@ export async function act(id: string, body: Record<string, unknown>): Promise<St
       const ledger = applyAnswer(x.ledger, open.track, answer);
       d.prepare('UPDATE step1_turns SET answer = ? WHERE id = ?').run(JSON.stringify(answer), open.id);
       d.prepare('UPDATE step1_sessions SET tracks = ?, ambiguity = ? WHERE id = ?').run(JSON.stringify(ledger), overall(ledger), id);
-      await askNext(id);
+      if (body.wrap !== true) await askNext(id); // wrap: true = 여기까지로 정리하기 with this answer kept, go to the Restate gate
       break;
     }
-    case 'wrap': // 여기까지로 정리하기: drop the open question, go to the Restate gate
+    case 'wrap': // 여기까지로 정리하기 with nothing picked or typed: drop the open question, go to the Restate gate
       if (x.s.status !== 'interviewing') break;
       if (!x.t.some((r) => r.answer)) throw new InputError('질문에 하나 이상 답해야 정리할 수 있어요.');
       if (open) d.prepare('DELETE FROM step1_turns WHERE id = ?').run(open.id);

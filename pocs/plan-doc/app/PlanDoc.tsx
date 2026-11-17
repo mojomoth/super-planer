@@ -1,6 +1,9 @@
 'use client';
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { flushSync } from 'react-dom';
 import { sourceLabel } from '@/lib/assemble';
+import { BASE } from '@/lib/base';
+import { IMAGE_PROMPT_MAX, NO_KEY, promptDraft } from '@/lib/imagegen';
 import { MAX_UPLOAD } from '@/lib/images';
 import type { DocRow, InputRow } from '@/lib/schema';
 import { Icon } from './icons';
@@ -14,6 +17,7 @@ type Props = {
   initialDoc: DocRow | null;
   step1: Step1Row[];
   workflowId: string | null;
+  hasOpenAIKey: boolean;
 };
 type Imported = { ids: string[]; message?: string };
 type Tab = 'preview' | 'markdown' | 'split';
@@ -22,8 +26,9 @@ type Save = 'saved' | 'dirty' | 'saving' | 'error';
 const TABS: [Tab, string][] = [['preview', '미리보기'], ['markdown', '마크다운'], ['split', '나란히']];
 const SAVE_TEXT: Record<Save, string> = { saved: '저장됨', dirty: '고친 내용 저장 대기 중', saving: '저장 중', error: '저장하지 못했어요. 잠시 뒤 다시 저장돼요.' };
 
-async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+/** `path` is app-relative (/api/…). */
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(BASE + path, init);
   const data = (await res.json().catch(() => ({}))) as T & { error?: string; message?: string };
   if (!res.ok) throw new Error(data.error ?? data.message ?? `요청이 실패했어요 (${res.status})`);
   return data;
@@ -34,7 +39,7 @@ const json = (method: string, body: unknown): RequestInit => ({ method, headers:
 const preview = (body: string | null) => (body ?? '').replace(/[#*_`>|-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
 const when = (iso: string) => new Date(iso).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1: initialStep1, workflowId }: Props) {
+export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1: initialStep1, workflowId, hasOpenAIKey }: Props) {
   const [inputs, setInputs] = useState(initialInputs);
   const [selected, setSelected] = useState<Set<string>>(() => new Set(initialInputs.map((i) => i.id)));
   const [imported, setImported] = useState<Imported | null>(null);
@@ -50,9 +55,14 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
   const [editing, setEditing] = useState<InputRow | 'new' | null>(null);
   const [captioning, setCaptioning] = useState<string | null>(null);
   const [addingImage, setAddingImage] = useState(false);
+  const [makingImage, setMakingImage] = useState(false);
+  // Lives here, not in the form: while a paid request runs the form cannot be closed and reopened to send a second one.
+  const [genBusy, setGenBusy] = useState(false);
   const [step1Open, setStep1Open] = useState(false);
   const [step1, setStep1] = useState(initialStep1);
   const tabRefs = useRef<Record<Tab, HTMLButtonElement | null>>({ preview: null, markdown: null, split: null });
+  const addImageRef = useRef<HTMLButtonElement>(null);
+  const makeImageRef = useRef<HTMLButtonElement>(null);
 
   const decisions = inputs.filter((i) => i.kind === 'decision');
   const images = inputs.filter((i) => i.kind === 'image');
@@ -69,7 +79,7 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
     let live = true;
     (async () => {
       try {
-        const res = await fetch('/api/import', json('POST', { workflow: workflowId }));
+        const res = await fetch(`${BASE}/api/import`, json('POST', { workflow: workflowId }));
         const data = (await res.json().catch(() => ({}))) as Partial<Imported> & { inputs?: InputRow[]; error?: string };
         if (!live) return;
         if (data.inputs) setInputs(data.inputs);
@@ -135,6 +145,8 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
       setSave('saved');
       setDocs((ds) => [{ id: r.doc.id, title: r.doc.title, provider: r.doc.provider, created_at: r.doc.created_at }, ...ds]);
       setTab('preview');
+      // the button is disabled while busy, so focus fell to <body>; move it (and the phone viewport) to the new document
+      document.getElementById('doc-h')?.focus();
       if (r.error) setNote(`모델 응답을 쓰지 못해 입력만으로 조립한 문서를 만들었어요. (${r.error})`);
     } catch (e) {
       setError((e as Error).message);
@@ -173,9 +185,18 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
     setSelected((s) => new Set(s).add(input.id));
   }
 
-  async function loadSeed() {
+  // Image forms unmount on close: focus the new tile (its name is read out) or go back to the toggle, never to <body>.
+  function closeImageForm(close: () => void, row: InputRow | null, toggle: HTMLButtonElement | null) {
+    flushSync(() => {
+      if (row) added(row);
+      close();
+    });
+    (row ? document.getElementById(`pick-${row.id}`) : toggle)?.focus();
+  }
+
+  async function loadSeed(kind: InputRow['kind']) {
     try {
-      const r = await api<{ inputs: InputRow[] }>('/api/seed', { method: 'POST' });
+      const r = await api<{ inputs: InputRow[] }>(`/api/seed?kind=${kind}`, { method: 'POST' });
       const had = new Set(inputs.map((i) => i.id));
       setInputs(r.inputs);
       // select only what the seed brought back; keep the user's other picks as they were
@@ -216,7 +237,7 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
     tabRefs.current[TABS[next][0]]?.focus();
   }
 
-  // Relative image paths (/samples, /api/images) only resolve inside this app, so exports get absolute URLs.
+  // Stored image URLs are root-relative (/plan/api/images/…, /workflow/samples/…) and only resolve on this site, so exports get absolute URLs.
   const exportMd = () => md.replace(/\]\(\/(?!\/)/g, `](${window.location.origin}/`);
 
   function download() {
@@ -324,12 +345,12 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
               ) : (
                 <div className="empty">
                   <p>결정 문서가 없어요. 직접 추가하거나 예시를 불러오세요.</p>
-                  <button type="button" className="btn" onClick={() => void loadSeed()}>예시 불러오기</button>
+                  <button type="button" className="btn" onClick={() => void loadSeed('decision')}>예시 불러오기</button>
                 </div>
               )}
             </div>
             <footer className="panel__foot plan-step1">
-              <button type="button" className="btn btn--ghost btn--sm" onClick={() => void openStep1()} aria-expanded={step1Open} aria-controls="step1-list">
+              <button type="button" className="btn btn--ghost btn--sm" onClick={() => void openStep1()} aria-expanded={step1Open} aria-controls={step1Open ? 'step1-list' : undefined}>
                 Step1 결과 가져오기
               </button>
               {step1Open ? (
@@ -348,7 +369,7 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
                     </ul>
                   ) : (
                     <p className="meta">
-                      Step1에서 끝낸 결과가 아직 없어요. <a href="http://localhost:3101/">질문하기에서 시작하기</a>
+                      Step1에서 끝낸 결과가 아직 없어요. <a href="/">질문하기에서 시작하기</a>
                     </p>
                   )}
                 </div>
@@ -366,18 +387,25 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
                 <button type="button" className="btn btn--ghost btn--sm" onClick={() => setAll(images, pickedImages.length !== images.length)} disabled={!images.length}>
                   {pickedImages.length === images.length && images.length ? '모두 해제' : '모두 선택'}
                 </button>
-                <button type="button" className="btn btn--sm" onClick={() => setAddingImage((v) => !v)} aria-expanded={addingImage}>
+                <button type="button" className="btn btn--sm" ref={addImageRef} onClick={() => setAddingImage((v) => !v)} aria-expanded={addingImage}>
                   <Icon name="plus" />추가
+                </button>
+                <button type="button" className="btn btn--sm" ref={makeImageRef} onClick={() => setMakingImage((v) => !v)} disabled={genBusy} aria-expanded={makingImage} aria-controls={makingImage ? 'img-gen' : undefined}>
+                  이미지 만들기
                 </button>
               </div>
             </header>
             <div className="panel__body">
               {addingImage ? (
-                <ImageForm
-                  onDone={(row) => {
-                    if (row) added(row);
-                    setAddingImage(false);
-                  }}
+                <ImageForm onDone={(row) => closeImageForm(() => setAddingImage(false), row, addImageRef.current)} />
+              ) : null}
+              {makingImage ? (
+                <ImageGenForm
+                  draft={promptDraft(pickedDecisions)}
+                  hasKey={hasOpenAIKey}
+                  busy={genBusy}
+                  setBusy={setGenBusy}
+                  onDone={(row) => closeImageForm(() => setMakingImage(false), row, makeImageRef.current)}
                 />
               ) : null}
               {images.length ? (
@@ -415,7 +443,7 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
               ) : (
                 <div className="empty">
                   <p>이미지가 없어요. 파일을 올리거나 https 주소로 추가하세요.</p>
-                  <button type="button" className="btn" onClick={() => void loadSeed()}>예시 이미지 불러오기</button>
+                  <button type="button" className="btn" onClick={() => void loadSeed('image')}>예시 이미지 불러오기</button>
                 </div>
               )}
             </div>
@@ -432,7 +460,7 @@ export default function PlanDoc({ initialInputs, initialDocs, initialDoc, step1:
         <section className="panel doc-panel" aria-labelledby="doc-h" aria-busy={busy}>
           <header className="panel__head doc-panel__head">
             <div className="doc-panel__title">
-              <h2 className="panel__title" id="doc-h">{doc ? `${doc.title} 기획서` : '기획서'}</h2>
+              <h2 className="panel__title" id="doc-h" tabIndex={-1}>{doc ? `${doc.title} 기획서` : '기획서'}</h2>
               {doc ? (
                 <p className="meta" suppressHydrationWarning>
                   LLM: {doc.provider ?? 'mock'}, {when(doc.created_at)} 생성
@@ -645,12 +673,62 @@ function ImageForm({ onDone }: { onDone: (row: InputRow | null) => void }) {
       </div>
       <div className="field">
         <label className="field__label" htmlFor="img-url">또는 이미지 주소</label>
-        <input className="input" id="img-url" type="url" inputMode="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://picsum.photos/seed/cave/640/400" aria-invalid={!!err} aria-describedby="img-err" />
+        <input className="input" id="img-url" type="url" inputMode="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/cave.png" aria-invalid={!!err} aria-describedby="img-err" />
       </div>
       <p className="field__error" id="img-err" role="alert">{err}</p>
       <div className="btn-row">
         <button type="submit" className="btn" disabled={busy} aria-busy={busy}>이미지 추가</button>
         <button type="button" className="btn btn--ghost" onClick={() => onDone(null)}>닫기</button>
+      </div>
+    </form>
+  );
+}
+
+// Opens with a fresh draft from the decisions picked right now (the form mounts on every open); later picks do not touch it.
+function ImageGenForm({ draft, hasKey, busy, setBusy, onDone }: { draft: string; hasKey: boolean; busy: boolean; setBusy: (b: boolean) => void; onDone: (row: InputRow | null) => void }) {
+  const [initial] = useState(draft);
+  const [prompt, setPrompt] = useState(initial);
+  const [title, setTitle] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  // Each request costs money: the button is only aria-disabled while busy, so this ref is what stops a second submit.
+  const sending = useRef(false);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (sending.current) return;
+    if (!prompt.trim()) return setErr('어떤 그림을 만들지 프롬프트를 적어 주세요.');
+    sending.current = true;
+    setBusy(true);
+    setErr(null);
+    try {
+      onDone((await api<{ input: InputRow }>('/api/images/generate', json('POST', { prompt, title }))).input);
+    } catch (e2) {
+      setErr((e2 as Error).message);
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form id="img-gen" className="add-form" onSubmit={submit} aria-label="이미지 만들기">
+      {hasKey ? null : <div className="notice" id="gen-nokey"><Icon name="alert" /><p>{NO_KEY}</p></div>}
+      <div className="field">
+        <label className="field__label" htmlFor="gen-prompt">프롬프트</label>
+        <textarea className="textarea" id="gen-prompt" rows={7} value={prompt} maxLength={IMAGE_PROMPT_MAX} onChange={(e) => setPrompt(e.target.value)} placeholder="예: 등불을 든 고슴도치 요리사가 어두운 버섯굴 입구에 서 있는 장면" aria-invalid={!!err && !prompt.trim()} aria-describedby={hasKey ? 'gen-help gen-err' : 'gen-nokey gen-help gen-err'} />
+        <p className="field__help" id="gen-help">{initial ? '고른 결정 문서로 채운 초안이에요. 고쳐 써도 돼요.' : '고른 결정 문서가 없어 비어 있어요. 그리고 싶은 장면을 직접 적거나, 결정을 고른 뒤 다시 열어 주세요.'} 만들 때마다 OpenAI 사용료가 나가요.</p>
+      </div>
+      <div className="field">
+        <label className="field__label" htmlFor="gen-title">이미지 이름 (선택)</label>
+        <input className="input" id="gen-title" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} placeholder="예: 버섯굴 입구 콘셉트" aria-describedby="gen-title-help" />
+        <p className="field__help" id="gen-title-help">비우면 프롬프트 앞부분을 이름으로 써요.</p>
+      </div>
+      <p className="field__error" id="gen-err" role="alert">{err}</p>
+      <div className="btn-row">
+        {/* aria-disabled, not disabled, while busy: focus stays on the button instead of dropping to <body> */}
+        <button type="submit" className="btn" disabled={!hasKey} aria-disabled={busy} aria-busy={busy}>만들기</button>
+        <button type="button" className="btn btn--ghost" onClick={() => onDone(null)} disabled={busy}>닫기</button>
+        <p className="meta" role="status">{busy ? '만드는 중이에요. 1분쯤 걸릴 수 있어요.' : ''}</p>
       </div>
     </form>
   );

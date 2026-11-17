@@ -1,6 +1,7 @@
 'use client';
 import { createContext, useContext } from 'react';
 import type { Node } from '@xyflow/react';
+import { BASE } from '@/lib/base';
 import type { Card, Message } from '@/lib/store';
 
 export type CardData = { card: Card; messages: Message[] };
@@ -20,9 +21,9 @@ export function useActions(): Actions {
   return a;
 }
 
-/** fetch + JSON with the server's Korean error message surfaced as the Error message. */
-export async function api<T>(url: string, method: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
+/** fetch + JSON with the server's Korean error message surfaced as the Error message. `path` is app-relative (/api/…). */
+export async function api<T>(path: string, method: string, body?: unknown): Promise<T> {
+  const res = await fetch(BASE + path, {
     method,
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),

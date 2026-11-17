@@ -1,6 +1,6 @@
 # Design: Super Planer PoCs
 
-The locked system for `step1` (3101), `workflow-view` (3102) and `plan-doc` (3103). Every screen reads this first and the three apps share it. Change it on purpose; the file is the rule. Source of truth for values: `pocs/shared/tokens.css` (each app's `app/globals.css` starts with `@import "../../shared/tokens.css";`, which also loads the fonts and every shared class below). Write app-specific CSS only for what this file does not cover, and only with tokens.
+The locked system for `step1` (`/`), `workflow-view` (`/workflow`) and `plan-doc` (`/plan`), served from one origin. Every screen reads this first and the three apps share it. Change it on purpose; the file is the rule. Source of truth for values: `pocs/shared/tokens.css` (each app's `app/globals.css` starts with `@import "../../shared/tokens.css";`, which also loads the fonts and every shared class below). Write app-specific CSS only for what this file does not cover, and only with tokens.
 
 ## System
 
@@ -73,11 +73,11 @@ Copy `assets/super-planer-icon.svg` into `public/`. The wordmark is live text so
 ```html
 <body><div class="app-shell">
   <header class="app-header">
-    <a class="app-brand" href="/"><img src="/super-planer-icon.svg" alt="" width="28" height="28"><span class="app-brand__name">Super Planer</span></a>
+    <a class="app-brand" href="/"><img src="/super-planer-icon.svg" alt="" width="28" height="28"><span class="app-brand__name">Super Planer</span></a>  <!-- this app's home: BASE, BASE + icon -->
     <nav class="app-nav" aria-label="PoC 이동"><ul>
-      <li><a href="http://localhost:3101/" aria-current="page">질문하기</a></li>
-      <li><a href="http://localhost:3102/">워크플로우</a></li>
-      <li><a href="http://localhost:3103/">기획서</a></li>
+      <li><a href="/" aria-current="page">질문하기</a></li>
+      <li><a href="/workflow">워크플로우</a></li>
+      <li><a href="/plan">기획서</a></li>
     </ul></nav>
     <p class="app-header__aside">LLM: mock</p>
   </header>
@@ -128,7 +128,7 @@ A `<fieldset class="choices">` of `<label class="chip">` around a real radio (on
 
 `.seg` switches a view of the same content (gallery 슬라이드/격자): `<div class="seg" role="group" aria-label="보기 방식"><button type="button" aria-pressed="true">슬라이드</button><button type="button" aria-pressed="false">격자</button></div>`.
 
-`.tabs` switches panels (plan-doc 미리보기/마크다운). Arrow keys move between tabs; only the selected tab has `tabindex="0"`.
+`.tabs` switches panels (plan-doc 미리보기/마크다운/나란히). Arrow keys move between tabs; only the selected tab has `tabindex="0"`.
 
 ```html
 <div class="tabs" role="tablist" aria-label="기획서 보기">
@@ -207,9 +207,9 @@ Every region that loads has four states. Loading: `<span class="skeleton" style=
 
 ## Screens (per app, layout only)
 
-- **step1** (`.app-main`, one column capped at 720px): first screen is a `.field` textarea + `.btn--primary` `질문 시작`. Interview: answered turns as `.chat` (agent question, user answer), current question below as `h2` at `--text-xl` + hint as `.meta` + `.choices` + optional textarea + `.btn-row` (`다음 질문` primary, `이전` ghost). Progress is a quiet `.meta` line (`질문 3 / 7`), no bar of dots. Result: game title `h1` at `--text-3xl`, one-liner at `--text-lg`, the ELI5 parts in an `.md-doc` (한 줄 요약, 비유로 말하면, 자세히, 그래서 뭐가 좋아?, 결정한 것들 as a table), then `워크플로우로 열기` as `.btn--primary` link.
-- **workflow-view** (`.app-main--full`): a toolbar row (workflow title, `.btn--primary` `기획서 만들기`, ghost actions) over the canvas. Canvas: `--color-paper-2` with a 16px dot grid in `--color-canvas-dot` (`radial-gradient(circle, var(--color-canvas-dot) 1px, transparent 1.5px) 0 0 / 16px 16px`). Card `<article class="panel node" data-status="active">`: 280px wide collapsed, 440px expanded, absolutely positioned by `transform: translate(x, y)`. Head: `.status` + `h3` title (`--text-md`, 600) + description (`.meta`, 2-line clamp) + actions (`btn--icon` expand with `aria-expanded`, `.btn--sm` `동결`, ghost `.btn--sm` `되돌리기`/`취소`). Expanded body: `.chat` capped at 360px with its own scroll, then `.composer`; a frozen card shows its decision on top as a `.notice` and hides the composer. `data-status="frozen"` sets the border to `--color-frozen`; `cancelled` sets `--color-paper-2` fill and a line-through on the title (text stays at full contrast). Ports: 10px squares, `--color-surface` fill, `--color-rule-2` border, at the vertical centre of the left and right edges. Edges: SVG cubic paths, 1.5px `--color-edge`, an edge into an active card `--color-edge-active`, into a cancelled card dashed; draw-in once with `stroke-dashoffset` at `--dur-long`, none under reduced motion. Dragged card: `--shadow-raised`, `cursor: grabbing`. Keyboard: cards are focusable, arrow keys nudge by 16px.
-- **plan-doc** (`.app-main`): two columns `minmax(0, 360px) minmax(0, 1fr)` at 60rem and up, stacked below. Left: inputs as `.panel`s (결정 문서 list with title + `.meta` source, 이미지 as `.gallery` grid, add/upload controls) and `.btn--primary` `기획서 생성`. Right: `.tabs` 미리보기 / 마크다운; preview is `<article class="md-doc">`, markdown is `<textarea class="textarea textarea--code">` with `min-height: 60dvh`; saved versions as a `.meta` list.
+- **step1** (`.app-main`, one column capped at 720px): first screen is a `.field` textarea + `.btn--primary` `질문 시작`. Interview: answered turns as `.chat` (agent question, user answer), current question below as `h2` at `--text-xl` + hint as `.meta` + `.choices` + optional textarea + `.btn-row` (`다음 질문` primary, `이전` ghost). Progress is a quiet `.meta` line (`질문 3 / 7`), no bar of dots. Result: game title `h1` at `--text-3xl`, one-liner at `--text-lg`, the ELI5 parts in an `.md-doc` (이게 뭐냐면, 비유하자면, 조금 더 자세히, 그래서 왜 재밌냐면, 결정한 것들 as a table), then `워크플로우로 열기` as `.btn--primary` link.
+- **workflow-view** (`.app-main--full`): a toolbar row (workflow title, `.btn--primary` `기획서 만들기`, ghost actions) over the canvas. Canvas: `--color-paper-2` with a 16px dot grid in `--color-canvas-dot` (`radial-gradient(circle, var(--color-canvas-dot) 1px, transparent 1.5px) 0 0 / 16px 16px`). Card `<article class="panel node" data-status="active">`: 280px wide collapsed, 440px expanded, absolutely positioned by `transform: translate(x, y)`. Head: `.status` + `h3` title (`--text-md`, 600) + description (`.meta`, 2-line clamp) + actions (`btn--icon` expand with `aria-expanded`, `.btn--sm` `동결`, ghost `.btn--sm` `되돌리기`/`취소`). Expanded body: `.chat` capped at 360px with its own scroll, then `.composer`; a frozen card shows its decision on top as a `.notice` and hides the composer. `data-status="frozen"` sets the border to `--color-frozen`; `cancelled` sets `--color-paper-2` fill and a line-through on the title; the title, message text and preview titles drop to `--color-muted` (still 4.5:1 or more), never opacity. Ports: 10px squares, `--color-surface` fill, `--color-rule-2` border, at the vertical centre of the left and right edges. Edges: SVG cubic paths, 1.5px `--color-edge`, an edge into an active card `--color-edge-active`, into a cancelled card dashed; a closed arrowhead at the target end in the line's colour; draw-in once with `stroke-dashoffset` at `--dur-long`, none under reduced motion. Dragged card: `--shadow-raised`, `cursor: grabbing`. Keyboard: cards are focusable; Enter or Space selects, then arrow keys nudge by 5px (Shift: 20px), React Flow's default.
+- **plan-doc** (`.app-main`): two columns `minmax(0, 360px) minmax(0, 1fr)` at 60rem and up, stacked below. Left: inputs as `.panel`s (결정 문서 list with title + `.meta` source, 이미지 as `.gallery` grid, add/upload controls) and `.btn--primary` `기획서 만들기`. Right: `.tabs` 미리보기 / 마크다운 / 나란히; preview is `<article class="md-doc">`, markdown is `<textarea class="textarea textarea--code">` with `min-height: 60dvh`; saved versions as a `.meta` list.
 
 ## Exports
 

@@ -50,8 +50,9 @@ const round = (n: number) => Math.round(n * 100) / 100;
 /** 을/를, 이/가 … picked by the last syllable's final consonant. */
 export function josa(word: string, withFinal: string, without: string): string {
   const c = word.replace(/[\s'"’”)\].,!?…]+$/, '').slice(-1).charCodeAt(0);
-  if (c >= 0xac00 && c <= 0xd7a3) return (c - 0xac00) % 28 ? withFinal : without;
-  return without;
+  if (!(c >= 0xac00 && c <= 0xd7a3)) return without;
+  const final = (c - 0xac00) % 28;
+  return final && !(final === 8 && withFinal === '으로') ? withFinal : without; // ㄹ (8) takes 로, not 으로: 물로, 걸로
 }
 
 const byPosition = (prompt: string, words: string[]) => words.filter((w) => prompt.includes(w)).sort((a, b) => prompt.indexOf(a) - prompt.indexOf(b));
@@ -121,6 +122,14 @@ export function shouldStop(l: Ledger, asked: number): boolean {
   return asked >= MAX_QUESTIONS || (overall(l) <= THRESHOLD && CORE.every((k) => l[k] <= CLEAR));
 }
 
+/** Take the model's re-score, except it may not lower a core track that was never asked: only an answer can clear it,
+ *  so shouldStop (and the model's "done") cannot end the interview before each core track got one question. */
+export function mergeLedger(l: Ledger, scored: Partial<Ledger>, history: TrackKey[]): Ledger {
+  const next = { ...l, ...scored };
+  for (const k of CORE) if (!history.includes(k)) next[k] = Math.max(next[k], l[k]);
+  return next;
+}
+
 /** Stored form of an answer: RECOMMEND becomes the first option (always the recommended one), flagged so it shows as "(추천)". */
 export function resolveAnswer(a: Answer, options: string[]): Answer {
   return a.choices.includes(RECOMMEND) && options[0] ? { choices: [options[0]], text: a.text, recommended: true } : a;
@@ -144,7 +153,14 @@ export function decisions(turns: Turn[]): Decision[] {
   return out;
 }
 
-const short = (s: string, n = 24) => (s.length > n ? `${s.slice(0, n).trim()}…` : s);
+/** Summary-sized text. Links (http(s)://…, www.…, or domain.tld/path) are dropped (the decisions table keeps the full answer)
+ *  so a cut never lands inside one; a link-only answer reads as "참고 링크". */
+export function short(s: string, n = 24): string {
+  // domain.tld/path must start at a word start and have a lowercase TLD, so '게임(https://…' keeps 게임 and '..PC/콘솔' stays text
+  const t = s.replace(/(?:https?:\/\/|www\.)\S+/gi, ' ').replace(/(?<![\w.-])[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\/\S*/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return s.trim() && '참고 링크';
+  return t.length > n ? `${t.slice(0, n).trim()}…` : t;
+}
 const quoted = (s: string, withFinal: string, without: string) => `“${s}”${josa(s, withFinal, without)}`;
 /** What was said to a track's main (first) question: picked options ("추천" resolved to the first option) plus the typed text.
  *  Follow-up answers dig deeper and live in the decisions table. */

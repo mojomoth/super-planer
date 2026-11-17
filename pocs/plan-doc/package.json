@@ -5,7 +5,7 @@
     "dev": "next dev -p 3103",
     "build": "next build",
     "start": "next start -p 3103",
-    "test": "node --test lib/assemble.test.mjs"
+    "test": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON lib/assemble.test.mjs lib/imagegen.test.mjs"
   },
   "dependencies": {
     "next": "16.4.6",

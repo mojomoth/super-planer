@@ -3,9 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ReactFlow, ReactFlowProvider, Background, BackgroundVariant, Controls, MiniMap,
-  useNodesState, useEdgesState, useReactFlow, addEdge,
-  type Edge as FlowEdge, type NodeChange, type Connection, type OnBeforeDelete,
+  useNodesState, useEdgesState, useReactFlow, addEdge, MarkerType, BaseEdge, getBezierPath,
+  type Edge as FlowEdge, type EdgeProps, type NodeChange, type Connection, type OnBeforeDelete,
 } from '@xyflow/react';
+import { BASE } from '@/lib/base';
 import type { Card, Edge, Message, Workflow } from '@/lib/store';
 import { ActionsContext, api, type Actions, type CardData, type CardNodeT } from './flow';
 import CardNode from './CardNode';
@@ -21,7 +22,9 @@ type Props = {
 };
 
 const nodeTypes = { card: CardNode };
-const PLAN_DOC = 'http://localhost:3103/';
+// replaces React Flow's default bezier edge for every connector
+const edgeTypes = { default: DrawnEdge };
+const PLAN_DOC = '/plan';
 
 const ARIA = {
   'node.a11yDescription.default': '엔터나 스페이스로 카드를 선택하고, 방향키로 옮겨요.',
@@ -86,8 +89,9 @@ function Flow({ workflow, cards, edges: initialEdges, messages, workflows, notic
     },
     async setStatus(id, action) {
       try {
-        const { card } = await api<{ card: Card }>(`/api/cards/${id}/status`, 'POST', { action });
+        const { card, error } = await api<{ card: Card; error?: string }>(`/api/cards/${id}/status`, 'POST', { action });
         patchCard(id, (d) => ({ ...d, card: { ...card, expanded: d.card.expanded, x: d.card.x, y: d.card.y } }));
+        if (error) setError(`LLM 응답을 받지 못해 “${card.title}” 결정은 기본 요약으로 적었어요.`);
       } catch (e) {
         fail(e);
       }
@@ -123,7 +127,7 @@ function Flow({ workflow, cards, edges: initialEdges, messages, workflows, notic
     const flush = () => {
       for (const [id, pos] of pending.current) {
         clearTimeout(timers.current.get(id));
-        fetch(`/api/cards/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(pos), keepalive: true }).catch(() => {});
+        fetch(`${BASE}/api/cards/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(pos), keepalive: true }).catch(() => {});
       }
       pending.current.clear();
       timers.current.clear();
@@ -155,8 +159,18 @@ function Flow({ workflow, cards, edges: initialEdges, messages, workflows, notic
     }
   }, [fail, setEdges]);
 
-  const status = new Map(nodes.map((n) => [n.id, n.data.card.status]));
-  const shownEdges = edges.map((e) => ({ ...e, className: `edge--${status.get(e.target) ?? 'active'}` }));
+  const byId = new Map(nodes.map((n) => [n.id, n.data.card]));
+  const shownEdges = edges.map((e) => {
+    const status = byId.get(e.target)?.status ?? 'active';
+    return {
+      ...e,
+      className: `edge--${status}`,
+      // the arrowhead takes the line's colour; xyflow writes it as an inline style, so a CSS variable works
+      markerEnd: { type: MarkerType.ArrowClosed, color: status === 'active' ? 'var(--color-edge-active)' : 'var(--color-edge)' },
+      // '까지' reads right after any title (no 로/으로 choice to get wrong)
+      ariaLabel: `${byId.get(e.source)?.title}에서 ${byId.get(e.target)?.title}까지 연결`,
+    };
+  });
   const frozen = nodes.filter((n) => n.data.card.status === 'frozen').length;
   const selectedEdges = edges.filter((e) => e.selected);
 
@@ -175,7 +189,8 @@ function Flow({ workflow, cards, edges: initialEdges, messages, workflows, notic
       <div className="wf">
         <div className="wf-toolbar">
           <div className="wf-toolbar__title">
-            <h1>{workflow.title}</h1>
+            {/* the select already shows the title; the h1 stays for heading navigation */}
+            <h1 className="visually-hidden">{workflow.title}</h1>
             <label className="visually-hidden" htmlFor="wf-select">워크플로우 선택</label>
             <select
               id="wf-select" className="select wf-select" value={workflow.id}
@@ -191,7 +206,7 @@ function Flow({ workflow, cards, edges: initialEdges, messages, workflows, notic
                 연결 삭제
               </button>
             )}
-            <button type="button" className="btn" id="add-card-btn" aria-expanded={adding} aria-controls="add-card" onClick={() => setAdding((v) => !v)}>
+            <button type="button" className="btn" id="add-card-btn" aria-expanded={adding} aria-controls={adding ? 'add-card' : undefined} onClick={() => setAdding((v) => !v)}>
               카드 추가
             </button>
             {frozen > 0 ? (
@@ -220,6 +235,7 @@ function Flow({ workflow, cards, edges: initialEdges, messages, workflows, notic
             nodes={nodes}
             edges={shownEdges}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
@@ -246,6 +262,25 @@ function Flow({ workflow, cards, edges: initialEdges, messages, workflows, notic
         </div>
       </div>
     </ActionsContext.Provider>
+  );
+}
+
+// Draws in once, on mount: a mask stroke grows along the path and reveals the line and its arrowhead together,
+// leaving the line's own colour and dash untouched; the mask goes away when the draw ends.
+// The mask region is spelled out because the default one is relative to the edge's own 300x150 <svg> and would clip it.
+function DrawnEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd }: EdgeProps) {
+  const [path] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
+  const [drawn, setDrawn] = useState(false);
+  const mask = `draw-${id}`;
+  return (
+    <>
+      {!drawn && (
+        <mask id={mask} maskUnits="userSpaceOnUse" x="-100000" y="-100000" width="200000" height="200000">
+          <path className="edge-draw" d={path} pathLength={1} onAnimationEnd={() => setDrawn(true)} />
+        </mask>
+      )}
+      <BaseEdge path={path} markerEnd={markerEnd} mask={drawn ? undefined : `url(#${mask})`} />
+    </>
   );
 }
 

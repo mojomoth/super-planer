@@ -17,9 +17,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </a>
             <nav className="app-nav" aria-label="PoC 이동">
               <ul>
-                <li><a href="http://localhost:3101/" aria-current="page">질문하기</a></li>
-                <li><a href="http://localhost:3102/">워크플로우</a></li>
-                <li><a href="http://localhost:3103/">기획서</a></li>
+                <li><a href="/" aria-current="page">질문하기</a></li>
+                <li><a href="/workflow">워크플로우</a></li>
+                <li><a href="/plan">기획서</a></li>
               </ul>
             </nav>
             <p className="app-header__aside">LLM: {provider()}</p>

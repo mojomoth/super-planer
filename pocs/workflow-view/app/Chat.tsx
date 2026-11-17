@@ -32,15 +32,17 @@ function Rich({ text }: { text: string }) {
 
 function Msg({ m, agentName }: { m: Message; agentName: string }) {
   const stamp = <time className="msg__time num" dateTime={m.created_at} suppressHydrationWarning>{time(m.created_at)}</time>;
+  // links the user pastes get previews too (plan-doc imports their images as well)
+  const urls = extractUrls(m.content);
   if (m.role === 'user') {
     return (
       <li className="msg msg--user">
         <p className="msg__who"><span className="visually-hidden">나</span>{stamp}</p>
         <div className="msg__body"><Rich text={m.content} /></div>
+        {urls.length > 0 && <Gallery urls={urls} />}
       </li>
     );
   }
-  const urls = extractUrls(m.content);
   return (
     <li className="msg msg--agent">
       <p className="msg__who"><Icon name="agent" />{agentName}{stamp}</p>
@@ -57,6 +59,7 @@ export default function Chat({ card, messages }: { card: Card; messages: Message
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const listRef = useRef<HTMLOListElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputId = `msg-${card.id}`;
   const agentName = `${card.title} 에이전트`;
 
@@ -78,6 +81,8 @@ export default function Chat({ card, messages }: { card: Card; messages: Message
       setErr((e as Error).message);
     } finally {
       setPending(false);
+      // 보내기 is disabled while waiting, which drops its focus to <body>: bring it back unless the user has moved on
+      if (document.activeElement === document.body) inputRef.current?.focus();
     }
   }
 
@@ -94,7 +99,9 @@ export default function Chat({ card, messages }: { card: Card; messages: Message
         {messages.map((m) => <Msg key={m.id} m={m} agentName={agentName} />)}
         {pending && (
           <li className="msg msg--agent">
-            <p className="msg__who"><Icon name="agent" />{agentName}<span className="visually-hidden">답변을 쓰는 중</span></p>
+            <p className="msg__who"><Icon name="agent" />{agentName}</p>
+            {/* an answer can take a minute: the LLM writes it, then OpenAI draws its example image */}
+            <p className="meta">답을 쓰고 예시 이미지를 만드는 중이에요. 수십 초 걸릴 수 있어요.</p>
             <span className="skeleton node__skel" /><span className="skeleton node__skel" />
           </li>
         )}
@@ -103,7 +110,7 @@ export default function Chat({ card, messages }: { card: Card; messages: Message
         <form className="composer" onSubmit={(e) => { e.preventDefault(); submit(); }}>
           <label className="visually-hidden" htmlFor={inputId}>메시지</label>
           <textarea
-            className="textarea" id={inputId} name="message" rows={1} maxLength={4000} value={text} disabled={pending}
+            ref={inputRef} className="textarea" id={inputId} name="message" rows={1} maxLength={4000} value={text} readOnly={pending}
             placeholder="예: 비밀방 아이디어를 더 주세요" onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {

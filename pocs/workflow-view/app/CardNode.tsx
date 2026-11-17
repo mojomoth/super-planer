@@ -1,5 +1,5 @@
 'use client';
-import { memo, useState } from 'react';
+import { memo, useRef, useState } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { useActions, type CardNodeT } from './flow';
 import { Icon, type IconName } from './icons';
@@ -14,11 +14,16 @@ function CardNode({ id, data }: NodeProps<CardNodeT>) {
   const [busy, setBusy] = useState<null | 'freeze' | 'undo'>(null);
   const titleId = `card-${id}-title`;
   const bodyId = `card-${id}-body`;
+  const undoRef = useRef<HTMLButtonElement>(null);
 
-  async function run(action: 'freeze' | 'undo') {
+  // aria-disabled, not disabled: a disabled button drops keyboard focus to <body> mid-request
+  async function run(action: 'freeze' | 'undo', from: HTMLElement) {
+    if (busy) return;
     setBusy(action);
     await setStatus(id, action);
     setBusy(null);
+    // 동결 disappears once frozen: hand focus to the button every state has, unless the user has moved on
+    if (document.activeElement === from || document.activeElement === document.body) undoRef.current?.focus();
   }
 
   return (
@@ -29,11 +34,11 @@ function CardNode({ id, data }: NodeProps<CardNodeT>) {
           <span className={`status status--${card.status}`}><Icon name={ICON[card.status]} />{LABEL[card.status]}</span>
           <div className="node__actions nodrag nopan">
             {card.status === 'active' && (
-              <button type="button" className="btn btn--sm" onClick={() => run('freeze')} disabled={!!busy} aria-busy={busy === 'freeze'}>
+              <button type="button" className="btn btn--sm" onClick={(e) => run('freeze', e.currentTarget)} aria-disabled={!!busy || undefined} aria-busy={busy === 'freeze'}>
                 <Icon name="lock" />동결
               </button>
             )}
-            <button type="button" className="btn btn--ghost btn--sm" onClick={() => run('undo')} disabled={!!busy} aria-busy={busy === 'undo'}>
+            <button ref={undoRef} type="button" className="btn btn--ghost btn--sm" onClick={(e) => run('undo', e.currentTarget)} aria-disabled={!!busy || undefined} aria-busy={busy === 'undo'}>
               {card.status === 'active' ? <><Icon name="slash" />취소</> : <><Icon name="undo" />되돌리기</>}
             </button>
             <button

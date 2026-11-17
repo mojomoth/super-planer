@@ -66,7 +66,8 @@ async function ensureServer() {
 
 await ensureServer();
 fs.mkdirSync(OUT, { recursive: true });
-const browser = await chromium.launch();
+// headless defaults to --hide-scrollbars, which hides even styled scrollbars the drafts show
+const browser = await chromium.launch({ ignoreDefaultArgs: ["--hide-scrollbars"] });
 try {
   for (const s of screens) {
     const name = s.id + (tag ? `-${tag}` : "");

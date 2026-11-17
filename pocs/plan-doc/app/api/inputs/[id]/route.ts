@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { NextResponse } from 'next/server';
+import { BASE } from '@/lib/base';
 import { store, UPLOAD_DIR, type InputRow } from '@/lib/schema';
 
 export const runtime = 'nodejs';
@@ -29,9 +30,9 @@ export async function DELETE(_req: Request, { params }: Ctx) {
   const row = d.prepare('SELECT * FROM plan_inputs WHERE id = ?').get(id) as InputRow | undefined;
   if (!row) return bad('항목을 찾지 못했어요.', 404);
   d.prepare('DELETE FROM plan_inputs WHERE id = ?').run(id);
-  // Uploaded files are named by their uuid row id; the regex keeps the path inside UPLOAD_DIR.
+  // Uploaded and OpenAI-made files are named by their uuid row id; the regex keeps the path inside UPLOAD_DIR.
   // A file still embedded in a saved plan doc stays on disk so that doc keeps its image.
-  const used = !!d.prepare("SELECT 1 FROM plan_docs WHERE instr(markdown, ?) > 0 LIMIT 1").get(`/api/images/${id}`);
-  if (row.source === 'upload' && /^[0-9a-f-]{36}$/.test(id) && !used) await fs.rm(path.join(UPLOAD_DIR, id), { force: true });
+  const used = !!d.prepare("SELECT 1 FROM plan_docs WHERE instr(markdown, ?) > 0 LIMIT 1").get(`${BASE}/api/images/${id}`);
+  if ((row.source === 'upload' || row.source === 'openai') && /^[0-9a-f-]{36}$/.test(id) && !used) await fs.rm(path.join(UPLOAD_DIR, id), { force: true });
   return NextResponse.json({ ok: true, keptFile: used });
 }

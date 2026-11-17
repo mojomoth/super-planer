@@ -1,6 +1,7 @@
 // Sample game workflow, inserted once when wf_workflows is empty so the PoC can be reviewed alone.
-// Local sample images are referenced absolutely (http://localhost:3102/samples/...) so plan-doc can show them too.
-const S = 'http://localhost:3102/samples';
+// Local sample images are root-relative with this app's basePath (/workflow/samples/...), so plan-doc on the same origin can show them too.
+// The .jpg ones were made once with the OpenAI Images API (the same request as lib/imagegen.ts) and committed.
+const S = '/workflow/samples';
 
 type SeedCard = {
   key: string;
@@ -26,9 +27,10 @@ export const SEED: { title: string; cards: SeedCard[]; edges: [string, string][]
 - 지상: 계속 자라는 오두막 정원
 - 분위기: 싸움보다 모으기와 피하기
 
+예시 이미지: ${S}/concept-garden.jpg
+
 참고:
-- https://en.wikipedia.org/wiki/Roguelike
-- https://picsum.photos/id/106/800/500`],
+- https://en.wikipedia.org/wiki/Roguelike`],
         ['user', '좋아요. 싸움은 최소로 하고 싶어요.'],
         ['agent', `그럼 위협을 **시간**으로 두는 걸 추천해요. 등불이 꺼지기 전에 지상으로 돌아와야 하니 긴장감은 남고 싸움은 줄어요.
 
@@ -66,7 +68,7 @@ export const SEED: { title: string; cards: SeedCard[]; edges: [string, string][]
 - **보리**: 느긋한 두더지, 땅굴로 지름길을 내요
 
 캐릭터 시트 초안: ${S}/character-sheet.svg
-분위기 참고: https://picsum.photos/id/40/800/500`],
+예시 이미지: ${S}/character-candidates.jpg`],
         ['user', '모모로 갈게요. 이웃은 몇 명이 좋을까요?'],
         ['agent', `첫 출시 범위라면 이웃 네 명이 알맞아요. 좋아하는 작물이 서로 달라서 무엇을 심을지 고를 이유가 생겨요.
 
@@ -93,8 +95,7 @@ export const SEED: { title: string; cards: SeedCard[]; edges: [string, string][]
         ['user', '비밀방은 어떻게 찾아요?'],
         ['agent', `벽에 핀 빛나는 꽃을 따라가면 열리게 해요. 냄새로 찾는 모모의 능력과도 잘 맞아요.
 
-- https://picsum.photos/id/152/800/500
-- https://picsum.photos/id/15/800/500`],
+예시 이미지: ${S}/level-secret-room.jpg`],
       ],
     },
     {
@@ -104,8 +105,8 @@ export const SEED: { title: string; cards: SeedCard[]; edges: [string, string][]
 
 팔레트 시안: ${S}/palette.svg
 분위기 참고:
-- https://picsum.photos/id/28/800/500
-- https://picsum.photos/id/1015/800/500
+- ${S}/art-underground.jpg
+- ${S}/art-surface.jpg
 - https://en.wikipedia.org/wiki/Concept_art`],
         ['user', '픽셀 아트도 괜찮을까요?'],
         ['agent', `괜찮아요. 다만 작은 화면에서도 씨앗 종류가 구분돼야 해요. 픽셀 버전과 손그림 버전으로 방 하나씩 그려 보고 고르는 걸 추천해요.
@@ -132,9 +133,10 @@ export const SEED: { title: string; cards: SeedCard[]; edges: [string, string][]
 - 넣을 것: PC 한 플랫폼, 지하 정원 한 지역, 이웃 네 명
 - 뺄 것: 계절 이벤트, 협동 플레이
 
+예시 이미지: ${S}/release-slice.jpg
+
 참고:
-- https://en.wikipedia.org/wiki/Early_access
-- https://picsum.photos/id/180/800/500`],
+- https://en.wikipedia.org/wiki/Early_access`],
       ],
     },
   ],

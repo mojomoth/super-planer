@@ -44,13 +44,15 @@ const NODES: {
   top: number;
   selected?: boolean;
   art?: boolean;
+  tight?: boolean; // draft packs this shorter card: 22px lines
+  foot?: number; // footer height, draft default 40
 }[] = [
-  { title: "게임 컨셉", icon: Mail, lines: ["숲속 마을의 우체국에서 편지를 배달하며", "주민들과 마음을 나누는 힐링 게임"], status: "done", box: [29, 221, 333, 207], top: 14 },
+  { title: "게임 컨셉", icon: Mail, lines: ["숲속 마을의 우체국에서 편지를 배달하며", "주민들과 마음을 나누는 힐링 게임"], status: "done", box: [29, 221, 333, 207], top: 14, foot: 44 },
   { title: "핵심 플레이", icon: Gamepad2, lines: ["편지 수령 → 배달 → 주민과의 교류로", "이어지는 따뜻한 배달 루프"], status: "doing", box: [447, 36, 370, 200], top: 14, selected: true },
-  { title: "세계관과 스토리", icon: BookOpen, lines: ["달빛이 비추는 숲속 마을을 배경으로,", "편지를 통해 주민들의 이야기가 이어지는 서사"], status: "done", box: [450, 257, 370, 188], top: 11 },
+  { title: "세계관과 스토리", icon: BookOpen, lines: ["달빛이 비추는 숲속 마을을 배경으로,", "편지를 통해 주민들의 이야기가 이어지는 서사"], status: "done", box: [450, 257, 370, 188], top: 11, tight: true },
   { title: "아트 방향", icon: ImageIcon, lines: ["포근하고 따뜻한 동화풍", "2D 일러스트 스타일로,", "달빛이 있는 아늑한 숲속 마을"], status: "done", box: [450, 463, 368, 234], top: 10, art: true },
   { title: "성장과 보상", icon: Trophy, lines: ["편지 배달과 주민과의 교류를 통해", "신뢰를 쌓고, 새로운 지역과 꾸미기 요소를 해금"], status: "todo", box: [913, 41, 373, 203], top: 14 },
-  { title: "등장인물", icon: Users, lines: ["우체국장, 단골 주민들, 그리고 편지로", "이어지는 다양한 마을 사람들"], status: "todo", box: [914, 291, 373, 202], top: 13 },
+  { title: "등장인물", icon: Users, lines: ["우체국장, 단골 주민들, 그리고 편지로", "이어지는 다양한 마을 사람들"], status: "todo", box: [914, 291, 373, 202], top: 13, foot: 42 },
 ];
 
 // Draft-absolute coords; the svg group is shifted by the canvas origin.
@@ -90,7 +92,7 @@ function NodeCard({ node }: { node: (typeof NODES)[number] }) {
   const badge = BADGE[node.status];
   return (
     <div
-      className={`absolute flex flex-col rounded-[12px] bg-white px-[18px] pb-[1px] shadow-[0_2px_8px_rgba(15,23,42,0.04)] ${
+      className={`absolute flex flex-col rounded-[12px] bg-white px-[18px] pb-[1px] shadow-[0_1px_1px_rgba(15,23,42,0.1),0_3px_9px_rgba(15,23,42,0.07)] ${
         node.selected ? "border-2 border-[#4F46E5]" : "border border-[#DCDEE4] hover:border-[#C9CCD6]"
       }`}
       style={{ left, top, width, height, paddingTop: node.top - (node.selected ? 1 : 0) }}
@@ -119,19 +121,19 @@ function NodeCard({ node }: { node: (typeof NODES)[number] }) {
           </p>
         </div>
       ) : (
-        <p className="mt-[9px] pl-[3px] text-[17.5px] leading-6 text-[#1E293B]">
+        <p className={`pl-[3px] text-[17.5px] text-[#1E293B] ${node.tight ? "mt-[7px] leading-[22px]" : "mt-[9px] leading-6"}`}>
           {node.lines.map((l) => (
             <span key={l} className="block">{l}</span>
           ))}
         </p>
       )}
 
-      <span className={`mt-[10px] inline-flex h-[29px] items-center gap-2 self-start rounded-full px-3 text-[17.5px] font-semibold ${badge.className}`}>
+      <span className={`${node.tight ? "mt-[7px]" : "mt-[10px]"} inline-flex h-[29px] items-center gap-2 self-start rounded-full px-3 text-[17.5px] font-semibold ${badge.className}`}>
         {badge.icon}
         {badge.label}
       </span>
 
-      <div className="mt-auto grid h-[44px] grid-cols-[1fr_1px_1.25fr_1px_42px] items-center border-t border-[#E4E6EC] text-[16.5px] text-[#334155]">
+      <div className="mt-auto grid grid-cols-[1fr_1px_1.25fr_1px_42px] items-center border-t border-[#E4E6EC] text-[16.5px] text-[#334155]" style={{ height: node.foot ?? 40 }}>
         <button className={`flex h-[30px] items-center gap-2 rounded-md pl-3 text-[#1E293B] hover:bg-[#F4F5F8] ${focus}`}>
           <MessageCircle className="size-[18px]" />
           <span>대화 <span className="font-medium">4</span></span>

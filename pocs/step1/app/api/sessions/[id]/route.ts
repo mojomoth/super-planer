@@ -10,7 +10,7 @@ export async function GET(_req: Request, { params }: Ctx) {
   return state ? NextResponse.json(state) : NextResponse.json({ error: '세션을 찾을 수 없어요.' }, { status: 404 });
 }
 
-// body: {action: 'answer', turnId, choices: string[], text} | {action: 'wrap' | 'more' | 'back' | 'finish'}
+// body: {action: 'answer', turnId, choices: string[], text, wrap?: true} | {action: 'wrap' | 'more' | 'back' | 'finish'}
 export async function POST(req: Request, { params }: Ctx) {
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== 'object' || Array.isArray(body)) return NextResponse.json({ error: '요청 형식이 잘못됐어요.' }, { status: 400 });

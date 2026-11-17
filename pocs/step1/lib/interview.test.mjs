@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   TRACK_KEYS, RECOMMEND, MAX_QUESTIONS, HARD_CAP, applyAnswer, blockedTrack, decisions, initialLedger, josa, mockConcept,
   mockQuestion, overall, parseConcept, parseQuestion, pickTrack, shouldStop, isOneQuestion, resolveAnswer, decisionOf, goalLine,
+  short, mergeLedger,
 } from './interview.ts';
 
 const PROMPT = '고양이가 우주 농장을 운영하는 느긋한 게임';
@@ -150,6 +151,15 @@ test('LLM output validation rejects blocked tracks and non-questions', () => {
 test('josa follows the final consonant', () => {
   assert.equal(josa('고양이', '과', '와'), '와');
   assert.equal(josa('농장', '과', '와'), '과');
+  assert.equal(josa('걸', '으로', '로'), '로'); // ㄹ takes 로 …
+  assert.equal(josa('집', '으로', '로'), '으로');
+  assert.equal(josa('걸', '을', '를'), '을'); // … only in the 으로/로 pair
+  assert.equal(josa('물', '이', '가'), '이');
+  const win = { track: 'win', question: 'q?', options: ['a'], answer: { choices: ['물건을 다 모을'], text: '' } };
+  assert.match(mockQuestion('좀비 게임', [win], 'win').question, /^‘물건을 다 모을’로 정했다면/);
+  const fun = { track: 'fun', question: 'q?', options: ['a'], answer: { choices: ['밤새 버틸'], text: '' } };
+  const loop = { track: 'loop', question: 'q?', options: ['a'], answer: { choices: ['숨기'], text: '' } };
+  assert.match(mockConcept('좀비 게임', [fun, loop]).what, /버틸로 숨기를/);
 });
 
 test('every mock question follows the one-question rule', () => {
@@ -184,4 +194,47 @@ test('an early stop waits for the core tracks (zombie example asks 이기고 지
   }
   assert.ok(tracks.includes('win'), tracks.join(','));
   assert.ok(tracks.length <= MAX_QUESTIONS);
+});
+
+test('summaries never cut a link in the middle', () => {
+  const url = 'https://www.youtube.com/watch?v=abc123';
+  const loop = { track: 'loop', question: 'q?', options: ['a'], answer: { choices: [], text: `좀비를 피해 다니는 느낌 ${url} 참고` } };
+  assert.equal(goalLine('좀비 게임', [loop]), '좀비를 피해 다니는 느낌 참고를 반복하는 게임이에요.');
+  assert.equal(short(`${url} 이런 느낌으로 계속 숨어 다니면서 물건을 모으기`), '이런 느낌으로 계속 숨어 다니면서 물건을 모…');
+  // links without a scheme are links too; ordinary words with dots or slashes are not
+  assert.equal(short('www.youtube.com/watch?v=abc123def 이런 느낌으로'), '이런 느낌으로');
+  assert.equal(short('이런 느낌 youtube.com/watch?v=abcdefghijk 참고하세요 진짜로'), '이런 느낌 참고하세요 진짜로');
+  assert.equal(short('3.5초 안에 A/B 중 1/2 고르기 v1.2', 60), '3.5초 안에 A/B 중 1/2 고르기 v1.2');
+  // a word glued to a link stays; dots before a slash are not a link
+  assert.ok(short('데드바이데이라이트(https://store.steampowered.com/app/381210) 같은 숨바꼭질', 60).startsWith('데드바이데이라이트'));
+  assert.equal(short('폰..PC/콘솔'), '폰..PC/콘솔');
+  assert.equal(short('음...PC/모바일 둘 다'), '음...PC/모바일 둘 다');
+  assert.equal(short('좋아요.PC/모바일'), '좋아요.PC/모바일');
+});
+
+test('a link-only answer reads as 참고 링크 in summaries and keeps its URL in the decisions table', () => {
+  const url = 'https://www.youtube.com/watch?v=abc123def&t=42s';
+  const loop = { track: 'loop', question: 'q?', options: ['a'], answer: { choices: [], text: url } };
+  const prompt = '좀비가 나오는 편의점에서 하룻밤 버티기';
+  assert.equal(short(url), '참고 링크');
+  assert.equal(short('youtu.be/abc123'), '참고 링크');
+  assert.equal(short('  '), '');
+  for (const track of ['win', 'loop']) {
+    const q = mockQuestion(prompt, [loop], track).question; // the win question quotes the loop answer; loop gets a follow-up
+    assert.ok(isOneQuestion(q) && q.includes('‘참고 링크’'), q);
+  }
+  assert.equal(goalLine(prompt, [loop]), '참고 링크를 반복하는 게임이에요.');
+  assert.equal(decisions([loop])[0].decision, url);
+});
+
+test('the model cannot close a core track nobody asked about', () => {
+  const l = initialLedger('좀비가 나오는 편의점에서 하룻밤 버티기');
+  const zero = Object.fromEntries(TRACK_KEYS.map((k) => [k, 0]));
+  const m = mergeLedger(l, zero, ['fun', 'loop', 'role']);
+  assert.equal(m.fun, 0);
+  assert.equal(m.mood, 0);
+  assert.equal(m.win, l.win); // never asked: keeps its own score
+  assert.ok(overall(m) <= 0.2);
+  assert.equal(shouldStop(m, 3), false); // so the interview goes on to ask 이기고 지는 조건
+  assert.equal(shouldStop(mergeLedger(l, zero, ['fun', 'loop', 'win']), 3), true);
 });

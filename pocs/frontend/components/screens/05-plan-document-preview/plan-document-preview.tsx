@@ -23,7 +23,7 @@ import {
   MessageCircle,
   Monitor,
   Mountain,
-  Waypoints,
+  GitFork,
   Palette,
   Plus,
   Settings,
@@ -64,6 +64,42 @@ const LOOP = [
   { icon: Mail, label: "편지 전달", w: 164 },
 ];
 
+// Sections below the draft's fold; long enough that the scroll thumb matches the draft (~197px).
+const MORE = [
+  {
+    id: "art",
+    n: "04",
+    title: "아트 방향",
+    intro: "달빛이 스며드는 따뜻한 밤 풍경을 중심으로, 부드러운 색감의 손그림 일러스트 스타일을 사용합니다.",
+    parts: [
+      ["색감과 분위기", "남색과 보라가 섞인 밤하늘을 기본 배경으로 두고, 창문 불빛과 등불에는 따뜻한 노란빛을 사용해 포근한 대비를 만듭니다. 채도는 전체적으로 낮게 유지해 오래 플레이해도 눈이 편안하도록 합니다."],
+      ["캐릭터", "주민들은 숲속 동물을 모티프로 한 2등신 캐릭터로 표현합니다. 둥근 실루엣과 단순한 표정으로 각자의 성격이 한눈에 드러나도록 하고, 계절마다 옷차림이 조금씩 바뀝니다."],
+      ["배경과 장소", "우체국, 호숫가, 언덕 위 등대, 버섯 숲 등 마을의 주요 장소는 각각 고유한 색 테마를 가집니다. 화면 전환 없이 이어지는 하나의 마을 지도로 구성해 걸어서 탐험하는 즐거움을 살립니다."],
+      ["빛과 시간", "게임 속 시간은 해 질 녘에서 새벽까지 흐르며, 시간대에 따라 달빛의 각도와 그림자의 길이가 달라집니다. 보름달이 뜨는 밤에는 특별한 편지와 이벤트가 등장합니다."],
+      ["계절 변화", "봄에는 벚꽃잎, 여름에는 반딧불, 가을에는 낙엽, 겨울에는 눈이 마을을 덮습니다. 계절마다 같은 장소도 색과 소품이 달라져 익숙한 길을 다시 걷는 재미를 줍니다."],
+      ["UI 스타일", "편지지와 우표, 소인 같은 우편 소품을 UI 요소로 활용합니다. 버튼과 창은 종이 질감을 살린 부드러운 모서리로 만들고, 손글씨 느낌의 서체는 제목에만 사용합니다."],
+      ["사운드", "잔잔한 피아노와 오르골 선율을 기본으로, 풀벌레 소리와 바람 소리 같은 환경음을 겹쳐 밤 마을의 고요함을 전합니다. 주민마다 짧은 테마 멜로디를 가집니다."],
+      ["레퍼런스", "그림책 같은 질감의 2D 일러스트 게임을 주요 레퍼런스로 삼습니다. 선은 얇고 부드럽게, 그림자는 단색 면으로 단순하게 처리해 동화책을 넘기는 듯한 인상을 줍니다."],
+    ],
+  },
+  {
+    id: "growth",
+    n: "05",
+    title: "성장과 보상",
+    intro: "편지를 전할 때마다 주민과의 친밀도가 오르고, 마을 곳곳에 새로운 장소와 이야기가 열립니다.",
+    parts: [
+      ["하루의 흐름", "하루는 아침에 우체국에서 편지를 받는 것으로 시작해, 밤이 깊어지면 집으로 돌아가 답장을 읽는 것으로 마무리됩니다. 하루에 전할 수 있는 편지 수는 정해져 있지 않습니다."],
+      ["친밀도", "주민마다 다섯 단계의 친밀도가 있으며, 편지를 전하고 대화를 나눌수록 단계가 오릅니다. 단계가 오를 때마다 주민의 새로운 사연과 부탁이 열립니다."],
+      ["우체국 성장", "배달을 마칠 때마다 우체국에 작은 별 조각이 모입니다. 별 조각으로 우체국을 꾸미거나 배달 가방, 자전거 같은 도구를 업그레이드할 수 있습니다."],
+      ["새로운 장소", "특정 주민과 가까워지면 그 주민만 아는 숲길이나 비밀 장소가 지도에 나타납니다. 새로운 장소에는 처음 만나는 주민과 아직 전하지 못한 편지가 기다리고 있습니다."],
+      ["수집 요소", "편지에 붙은 우표와 주민들이 건네는 작은 선물은 수집 앨범에 모입니다. 앨범의 한 페이지를 채울 때마다 마을 광장에 기념 장식이 하나씩 늘어납니다."],
+      ["답장과 기록", "전한 편지와 받은 답장은 모두 배달 일지에 기록됩니다. 일지를 다시 읽으며 주민들의 이야기가 어떻게 이어져 왔는지 돌아볼 수 있습니다."],
+      ["실패 없는 진행", "배달 시간 제한이나 실패 조건은 두지 않습니다. 플레이어는 원하는 속도로 마을을 둘러보며, 늦게 도착한 편지에도 주민들은 반갑게 답장을 보냅니다."],
+      ["엔딩과 이후", "모든 주민의 이야기를 마치면 달빛 축제가 열리며 첫 번째 엔딩을 맞습니다. 엔딩 이후에도 계절이 바뀌며 새로운 주민과 편지가 계속 찾아옵니다."],
+    ],
+  },
+];
+
 const MARKDOWN = `# 달빛 우체국
 숲속 마을에서 전하는 작은 마음들
 
@@ -81,7 +117,7 @@ const MARKDOWN = `# 달빛 우체국
 ## 03 세계관과 스토리
 달빛이 비추는 작은 숲속 마을 '달빛 마을'이 배경입니다. 마을의 우체국을 거점으로, 플레이어는 우편 배달원이 되어
 주민들에게 편지를 전하고, 편지에 담긴 사연을 통해 마을 사람들의 소소하고 따뜻한 이야기를 만나게 됩니다.
-`;
+${MORE.map((s) => `\n## ${s.n} ${s.title}\n${s.intro}\n${s.parts.map(([h, p]) => `\n### ${h}\n${p}\n`).join("")}`).join("")}`;
 
 export function PlanDocumentPreview() {
   const [view, setView] = useState<"preview" | "markdown">("preview");
@@ -183,7 +219,7 @@ export function PlanDocumentPreview() {
 
           <nav className="mt-[17px] flex gap-[17px] border-b border-[#e8eaf1] pl-[9px] text-base">
             <Link href="/workflow" className="flex h-[44px] items-center gap-[10px] px-[18px] text-[#444759] hover:text-[#0b0d17]">
-              <Waypoints className="size-[19px] text-[#484e64]" strokeWidth={1.75} />
+              <GitFork className="size-[19px] rotate-180 text-[#484e64]" strokeWidth={1.75} />
               워크플로우
             </Link>
             <span
@@ -261,7 +297,8 @@ export function PlanDocumentPreview() {
                 </Button>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto bg-[#f5f5fa] pt-[16px] [scrollbar-color:#c0c0c7_transparent] [scrollbar-width:thin]">
+              {/* Always-visible draft scrollbar; no scrollbar-width/color (Chrome ignores ::-webkit-scrollbar when set). Gutter on both edges keeps the article centered. */}
+              <div className="min-h-0 flex-1 overflow-y-auto bg-[#f5f5fa] pt-[16px] [scrollbar-gutter:stable_both-edges] [&::-webkit-scrollbar]:w-[12px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-[#bebfc5] [&::-webkit-scrollbar-thumb]:bg-clip-padding [&::-webkit-scrollbar-track]:bg-[#fbfbfd]">
                 {view === "preview" ? <Document /> : (
                   <pre className="mx-auto w-[916px] rounded-lg border border-[#dfe1e9] bg-white px-12 py-7 font-mono text-sm leading-6 whitespace-pre-wrap text-[#282938]">
                     {MARKDOWN}
@@ -351,20 +388,18 @@ function Document() {
         </p>
       </section>
 
-      {/* 04, 05 are below the fold in the draft; short placeholders so the TOC anchors land somewhere. */}
-      <section id="art" className="mt-[26px] scroll-mt-4">
-        <SectionTitle n="04">아트 방향</SectionTitle>
-        <p className="mt-[6px] text-[15px] leading-[20px] text-[#282938]">
-          달빛이 스며드는 따뜻한 밤 풍경을 중심으로, 부드러운 색감의 손그림 일러스트 스타일을 사용합니다.
-        </p>
-      </section>
-
-      <section id="growth" className="mt-[26px] scroll-mt-4">
-        <SectionTitle n="05">성장과 보상</SectionTitle>
-        <p className="mt-[6px] text-[15px] leading-[20px] text-[#282938]">
-          편지를 전할 때마다 주민과의 친밀도가 오르고, 마을 곳곳에 새로운 장소와 이야기가 열립니다.
-        </p>
-      </section>
+      {MORE.map(({ id, n, title, intro, parts }) => (
+        <section key={id} id={id} className="mt-[26px] scroll-mt-4">
+          <SectionTitle n={n}>{title}</SectionTitle>
+          <p className="mt-[6px] text-[15px] leading-[20px] text-[#282938]">{intro}</p>
+          {parts.map(([h, p]) => (
+            <div key={h} className="mt-[18px]">
+              <h3 className="text-[17px] leading-6 font-semibold">{h}</h3>
+              <p className="mt-[4px] text-[15px] leading-[24px] text-[#282938]">{p}</p>
+            </div>
+          ))}
+        </section>
+      ))}
     </article>
   );
 }

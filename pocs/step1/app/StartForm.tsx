@@ -10,12 +10,13 @@ const EXAMPLES = [
 ];
 
 // Plain form POST (works without JS); JS only fills examples, adds Ctrl/Cmd+Enter and the busy state.
+// noValidate: the server checks length and shows the app's own message instead of the browser bubble.
 export default function StartForm({ error }: { error?: string }) {
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   return (
-    <form className="start panel" action="/api/sessions" method="post" onSubmit={() => setBusy(true)} aria-busy={busy}>
+    <form className="start panel" action="/api/sessions" method="post" onSubmit={() => setBusy(true)} aria-busy={busy} noValidate>
       <div className="panel__body start__body">
         <div className="field">
           <label className="field__label" htmlFor="prompt">게임 아이디어</label>

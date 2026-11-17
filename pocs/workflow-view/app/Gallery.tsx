@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { BASE } from '@/lib/base';
 import { hostOf, isImageUrl } from '@/lib/urls';
 import { Icon } from './icons';
 
@@ -12,7 +13,7 @@ function loadPreview(url: string): Promise<Preview> {
   let p = cache.get(url);
   if (!p) {
     const failed: Preview = { url, kind: 'page', title: null, description: null, image: null, site: hostOf(url), error: 'failed' };
-    p = fetch(`/api/preview?url=${encodeURIComponent(url)}`)
+    p = fetch(`${BASE}/api/preview?url=${encodeURIComponent(url)}`)
       .then((r) => (r.ok ? (r.json() as Promise<Preview>) : failed))
       .catch(() => failed);
     cache.set(url, p);
@@ -29,20 +30,21 @@ function Img({ src, alt, eager = false }: { src: string; alt: string; eager?: bo
   return <img src={src} alt={alt} loading={eager ? 'eager' : 'lazy'} decoding="async" width="640" height="400" onError={() => setBroken(true)} />;
 }
 
+// A file name only when the path ends in one: generated images (/workflow/api/images/<id>) end in an id, which tells nothing.
 // Agent text can carry any URL, including bad percent escapes: never let one throw during render.
-function fileName(url: string, host: string): string {
+function fileName(url: string): string | null {
   try {
-    const last = new URL(url).pathname.split('/').filter(Boolean).at(-1);
-    return last ? decodeURIComponent(last) : host;
+    const last = new URL(url, 'http://own.invalid').pathname.split('/').filter(Boolean).at(-1); // base: own paths are root-relative
+    return last && /\.[a-z0-9]{2,5}$/i.test(last) ? decodeURIComponent(last) : null;
   } catch {
-    return host;
+    return null;
   }
 }
 
-function ImageTile({ url, onOpen, eager }: { url: string; onOpen: Open; eager: boolean }) {
+function ImageTile({ url, n, onOpen, eager }: { url: string; n: number; onOpen: Open; eager: boolean }) {
   const host = hostOf(url);
-  const name = fileName(url, host);
-  const alt = `${host}의 이미지 ${name}`;
+  const name = fileName(url) ?? `이미지 ${n}`;
+  const alt = `미리보기 ${n}, ${host}의 ${name}`;
   return (
     <li className="preview">
       <button type="button" className="preview__link preview__btn" aria-label={`${alt} 크게 보기`} onClick={(e) => onOpen(url, alt, e.currentTarget)}>
@@ -123,13 +125,14 @@ export default function Gallery({ urls }: { urls: string[] }) {
         )}
       </div>
       <ul className="gallery__track" data-view={urls.length > 1 ? view : 'grid1'} ref={track} onScroll={view === 'slide' ? onScroll : undefined}>
-        {urls.map((u, i) => (isImageUrl(u) ? <ImageTile key={u} url={u} onOpen={open} eager={i === 0} /> : <PageTile key={u} url={u} eager={i === 0} />))}
+        {urls.map((u, i) => (isImageUrl(u) ? <ImageTile key={u} url={u} n={i + 1} onOpen={open} eager={i === 0} /> : <PageTile key={u} url={u} eager={i === 0} />))}
       </ul>
+      {/* aria-disabled, not disabled: reaching either end must not drop keyboard focus to <body> */}
       {urls.length > 1 && view === 'slide' && (
         <div className="gallery__nav">
-          <button type="button" className="btn btn--ghost btn--icon btn--sm" aria-label="이전 미리보기" onClick={() => go(-1)} disabled={pos === 0}><Icon name="prev" /></button>
+          <button type="button" className="btn btn--ghost btn--icon btn--sm" aria-label="이전 미리보기" onClick={() => pos > 0 && go(-1)} aria-disabled={pos === 0 || undefined}><Icon name="prev" /></button>
           <p className="meta num" aria-live="polite">{pos + 1} / {urls.length}</p>
-          <button type="button" className="btn btn--ghost btn--icon btn--sm" aria-label="다음 미리보기" onClick={() => go(1)} disabled={pos >= urls.length - 1}><Icon name="next" /></button>
+          <button type="button" className="btn btn--ghost btn--icon btn--sm" aria-label="다음 미리보기" onClick={() => pos < urls.length - 1 && go(1)} aria-disabled={pos >= urls.length - 1 || undefined}><Icon name="next" /></button>
         </div>
       )}
       {box && createPortal(

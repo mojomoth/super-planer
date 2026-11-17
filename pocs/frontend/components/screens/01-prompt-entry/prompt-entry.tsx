@@ -36,11 +36,11 @@ export function PromptEntry() {
         <Button
           asChild
           variant="outline"
-          className="ml-auto h-[46px] gap-3 rounded-[10px] bg-card px-[19px] text-[17px] font-[550]"
+          className="ml-auto h-[46px] gap-3 rounded-[10px] bg-card px-[19px] text-[17px] font-[550] max-sm:px-3"
         >
           <Link href="/workflow">
             <Folder strokeWidth={2} className="size-[22px]" />
-            내 프로젝트
+            <span className="max-sm:sr-only">내 프로젝트</span>
           </Link>
         </Button>
         <Avatar className="ml-[21px] size-9 after:border-0">
@@ -48,14 +48,14 @@ export function PromptEntry() {
         </Avatar>
       </header>
 
-      <main className="flex flex-1 flex-col items-center pt-[76px]">
-        <Logo size={80} />
-        <h1 className="mt-[38px] text-[60px] leading-[76px] font-bold">어떤 게임을 만들고 싶나요?</h1>
-        <p className="mt-[11px] text-[26.5px] leading-[36px] text-[#52525B]">
+      <main className="flex flex-1 flex-col items-center px-4 pt-[76px] pb-10">
+        <Logo size={80} className="max-sm:h-auto max-sm:w-[320px]" />
+        <h1 className="mt-[38px] text-center text-[60px] leading-[76px] font-bold">어떤 게임을 만들고 싶나요?</h1>
+        <p className="mt-[11px] text-center text-[26.5px] leading-[36px] text-[#52525B]">
           떠오른 아이디어를 적어주세요. 질문을 나누며 기획을 구체화해요.
         </p>
 
-        <div className="mt-[44px] flex h-[280px] w-[1014px] flex-col rounded-[14px] border bg-card">
+        <div className="mt-[44px] flex h-[280px] w-full max-w-[1014px] flex-col rounded-[14px] border bg-card">
           <Textarea
             autoFocus
             ref={(el) => el?.setSelectionRange(el.value.length, el.value.length)}
@@ -73,10 +73,10 @@ export function PromptEntry() {
           <div className="mx-4 flex h-[81px] items-center justify-between border-t">
             <Button
               variant="outline"
-              className="h-[50px] gap-4 rounded-[10px] bg-card pr-6 pl-6 text-lg font-[550] hover:bg-zinc-50"
+              className="h-[50px] gap-4 rounded-[10px] bg-card pr-6 pl-6 text-lg font-[550] hover:bg-zinc-50 max-sm:px-3"
             >
               <Paperclip strokeWidth={2} className="size-5 text-[#52525B]" />
-              참고 자료
+              <span className="max-sm:sr-only">참고 자료</span>
             </Button>
             <Button
               asChild
@@ -97,7 +97,7 @@ export function PromptEntry() {
           를 눌러도 기획을 시작할 수 있어요.
         </p>
 
-        <div className="mt-[28px] flex gap-[21px]">
+        <div className="mt-[28px] flex flex-wrap justify-center gap-[21px]">
           {GENRES.map(({ icon: Icon, label }) => (
             <Button
               key={label}
@@ -110,10 +110,10 @@ export function PromptEntry() {
           ))}
         </div>
 
-        <ol className="mt-[54px] flex items-center">
+        <ol className="mt-[54px] flex flex-wrap items-center justify-center gap-y-4">
           {STEPS.map((label, i) => (
             <li key={label} aria-current={i === 0 ? "step" : undefined} className="flex items-center">
-              {i > 0 && <MoveRight strokeWidth={1.5} className="mx-[54px] size-7 text-[#7B7E8D]" />}
+              {i > 0 && <MoveRight strokeWidth={1.5} className="mx-[54px] size-7 max-sm:mx-3 text-[#7B7E8D]" />}
               <span
                 className={
                   i === 0

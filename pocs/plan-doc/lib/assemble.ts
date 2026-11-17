@@ -23,6 +23,7 @@ export function sourceLabel(source: string | null): string {
   if (!source) return '직접 입력';
   if (source === 'seed') return '예시';
   if (source === 'upload' || source === 'manual') return '직접 입력';
+  if (source === 'openai') return 'OpenAI';
   if (source.startsWith('wf:')) return '워크플로우';
   if (source.startsWith('step1:')) return 'Step1';
   return source;
@@ -137,8 +138,10 @@ export function assemble(decisions: Decision[], images: ImageInput[], fallbackTi
   const funDecs = decisions.filter((x) => has(x, ['재미', '콘셉트', '컨셉']));
   // A decision whose body is only overview lines (가제, 장르, ...) already lives in 개요.
   const detail = (x: Decision) => bodyRest(x.body, [...OVERVIEW_KEYS, ...OPEN_KEYS, '결정']);
-  const systemDecs = decisions.filter((x) => x !== loopDec && !artDecs.includes(x) && detail(x));
-  const funFrom = funDecs.length ? funDecs : decisions.filter((x) => x !== loopDec && detail(x));
+  const others = decisions.filter((x) => x !== loopDec && !artDecs.includes(x));
+  const systemDecs = others.filter(detail);
+  // No fun-titled decision: use the rest, never the loop or art ones (they have their own sections).
+  const funFrom = funDecs.length ? funDecs : systemDecs.length ? systemDecs : others;
 
   const md: string[] = [`# ${title} 기획서`, ''];
 
@@ -163,6 +166,8 @@ export function assemble(decisions: Decision[], images: ImageInput[], fallbackTi
 
   md.push('## 아트·분위기', '');
   const artText = artDecs.map((d) => unlabel(bodyRest(d.body, OPEN_KEYS)).replace(/^#{1,6}\s/gm, '#### ')).filter(Boolean);
+  // Step1 concepts carry the art direction as a `분위기와 그림체: …` line, not as a titled decision.
+  if (!artText.length) { const mood = fact(decisions, ['분위기', '그림체', '아트']); if (mood) artText.push(mood); }
   for (const t of artText) md.push(t, '');
   if (!artText.length && !images.length) md.push('아트 방향을 정한 결정이나 이미지가 아직 없어요.', '');
   for (const img of images) md.push(imageMd(img), '');
